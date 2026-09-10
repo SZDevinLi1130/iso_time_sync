@@ -24,21 +24,26 @@
 #include <stdlib.h>
 #include <string.h>
 #include "time_sync.h"
-#include "iso_time_sync.h" /* controller_time_us_get() */
 
 #define TS_RING_SIZE         256
 #define TS_MIN_LOCK_SAMPLES  64
-#define TS_HOLDOVER_US       1000000UL /* 1 s without an update */
 #define TS_SDU_INTERVAL_US   5000UL    /* nominal SDU interval (see prj.conf) */
 
 static int32_t ts_ring[TS_RING_SIZE];
+static uint32_t ts_local_ring[TS_RING_SIZE]; /* local ts of each sample */
 static uint16_t ts_count;
 static uint16_t ts_head; /* index of the oldest sample */
 
+/* Working buffers, file-scoped rather than on the call stack:
+ * time_sync_update() runs in the BT RX workqueue whose stack is small.
+ */
+static int32_t ts_scratch[TS_RING_SIZE];
+static int32_t ts_ordered[TS_RING_SIZE];
+
 static bool ts_locked;
-static int64_t ts_offset_us;   /* shared = local + offset */
-static int64_t ts_drift_ppm;   /* drift in us/s (ppm) */
-static uint64_t ts_last_local64; /* local time at the last update (us) */
+static int64_t ts_offset_us;  /* shared = local + offset (at ts_ref_local) */
+static int64_t ts_drift_ppm;  /* drift in us/s (ppm) */
+static uint32_t ts_ref_local; /* local ts at which ts_offset_us is valid */
 
 static uint32_t ts_update_cnt;
 static int32_t ts_residual_max_us;
@@ -67,8 +72,6 @@ void time_sync_update(uint32_t tx_ts_us, uint32_t local_ts_us)
 {
 	/* Wrap-safe offset between two 1 MHz clocks. */
 	int32_t meas = (int32_t)(tx_ts_us - local_ts_us);
-	int32_t scratch[TS_RING_SIZE];
-	int32_t ordered[TS_RING_SIZE];
 	uint16_t start;
 	uint16_t half;
 	int32_t med_old;
@@ -77,13 +80,13 @@ void time_sync_update(uint32_t tx_ts_us, uint32_t local_ts_us)
 	int32_t resid;
 
 	ts_ring[ts_head] = meas;
+	ts_local_ring[ts_head] = local_ts_us;
 	ts_head = (ts_head + 1) % TS_RING_SIZE;
 	if (ts_count < TS_RING_SIZE) {
 		ts_count++;
 	}
 
 	ts_update_cnt++;
-	ts_last_local64 = controller_time_us_get();
 
 	if (ts_count < TS_MIN_LOCK_SAMPLES) {
 		return;
@@ -92,21 +95,27 @@ void time_sync_update(uint32_t tx_ts_us, uint32_t local_ts_us)
 	/* Copy the ring into chronological order (oldest first). */
 	start = (ts_head + TS_RING_SIZE - ts_count) % TS_RING_SIZE;
 	for (uint16_t i = 0; i < ts_count; i++) {
-		ordered[i] = ts_ring[(start + i) % TS_RING_SIZE];
+		ts_ordered[i] = ts_ring[(start + i) % TS_RING_SIZE];
 	}
 
 	/* Offset = median of the full window (robust against outliers). */
-	ts_offset_us = median_of(ordered, ts_count, scratch);
+	ts_offset_us = median_of(ts_ordered, ts_count, ts_scratch);
 
 	/* Drift from the slope between the two half-window medians. */
 	half = ts_count / 2;
-	med_old = median_of(ordered, half, scratch);
-	med_new = median_of(ordered + (ts_count - half), half, scratch);
+	med_old = median_of(ts_ordered, half, ts_scratch);
+	med_new = median_of(ts_ordered + (ts_count - half), half, ts_scratch);
 	dt_us = (int64_t)half * TS_SDU_INTERVAL_US;
 
 	/* (med_new - med_old)/dt_us is a fraction; *1e6 -> ppm (us/s). */
 	ts_drift_ppm = (int64_t)(med_new - med_old) * 1000000 / dt_us;
 	ts_locked = true;
+
+	/* The median value corresponds to the chronologically middle sample;
+	 * remember its local timestamp so to_shared() can extrapolate the
+	 * drift forward to the current instant.
+	 */
+	ts_ref_local = ts_local_ring[(start + ts_count / 2) % TS_RING_SIZE];
 
 	resid = meas - (int32_t)ts_offset_us;
 	if (resid < 0) {
@@ -117,22 +126,24 @@ void time_sync_update(uint32_t tx_ts_us, uint32_t local_ts_us)
 	}
 }
 
-int64_t time_sync_to_shared(uint64_t local_grtc_us)
+int64_t time_sync_to_shared(uint32_t local_ts_us)
 {
 	int64_t offset = ts_offset_us;
 
 	if (ts_locked) {
-		uint64_t now = controller_time_us_get();
+		/* Extrapolate the drift from the reference instant (window
+		 * midpoint) to the current instant. This also covers holdover,
+		 * since age keeps growing while no updates arrive.
+		 */
+		int32_t age_us = (int32_t)(local_ts_us - ts_ref_local);
 
-		if (now - ts_last_local64 > TS_HOLDOVER_US) {
-			/* Holdover: extrapolate using the last drift estimate. */
-			int64_t elapsed_us = (int64_t)(now - ts_last_local64);
-
-			offset += ts_drift_ppm * elapsed_us / 1000000;
-		}
+		offset += (int64_t)ts_drift_ppm * age_us / 1000000;
 	}
 
-	return (int64_t)local_grtc_us + offset;
+	/* Map the local 32-bit timestamp onto the broadcaster's 32-bit
+	 * timebase (both wrap at the same ~1 MHz rate).
+	 */
+	return (int64_t)(int32_t)local_ts_us + offset;
 }
 
 bool time_sync_is_locked(void)

@@ -23,12 +23,17 @@
 void time_sync_update(uint32_t tx_ts_us, uint32_t local_ts_us);
 
 /**
- * @brief Map a local GRTC time onto the broadcaster's timebase.
+ * @brief Map a local 32-bit controller timestamp onto the broadcaster's
+ *        timebase.
  *
- * @param local_grtc_us Local 64-bit GRTC time in microseconds.
+ * Both clocks wrap at the same ~1 MHz rate, so the mapping is a wrap-safe
+ * 32-bit addition; do not mix in the local 64-bit GRTC high bits.
+ *
+ * @param local_ts_us Local controller timestamp (32-bit, e.g. the ISO SDU
+ *        synchronization reference).
  * @return The corresponding time in the broadcaster's timebase (us).
  */
-int64_t time_sync_to_shared(uint64_t local_grtc_us);
+int64_t time_sync_to_shared(uint32_t local_ts_us);
 
 /**
  * @brief Whether the servo has collected enough samples and is tracking.

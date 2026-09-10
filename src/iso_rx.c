@@ -98,14 +98,7 @@ static void iso_recv(struct bt_iso_chan *chan, const struct bt_iso_recv_info *in
 	}
 
 	if (counter % 100 == 0) {
-		uint64_t now64 = controller_time_us_get();
-		uint64_t local64 = (now64 & 0xFFFFFFFF00000000ULL) | info->ts;
-		int64_t shared_ts;
-
-		if (info->ts < (uint32_t)now64) {
-			local64 += 0x100000000ULL; /* info->ts wrapped */
-		}
-		shared_ts = time_sync_to_shared(local64);
+		int64_t shared_ts = time_sync_to_shared(info->ts);
 
 		printk("Recv SDU counter %u timestamp %u us btn_val: %d shared_ts %lld us\n",
 		       counter, info->ts, btn_pressed, (long long)shared_ts);
