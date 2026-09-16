@@ -46,6 +46,10 @@ via a software clock servo. UI docs are in Chinese; code/comments are English.
 - `sync_log.c` owns a low-priority thread that prints the periodic/event logs;
   the BT RX/TX callbacks only enqueue numeric records (non-blocking). Do not
   move `printk` back into `iso_rx.c`/`iso_tx.c` callbacks.
+- `temp_sensor.c` samples the on-chip TEMP and feeds
+  `time_sync_set_temperature()`; the filter uses a Huber soft gate and scales
+  its process noise with |dT/dt|. Only built when `CONFIG_TIME_SYNC_TEMP_COMP`
+  is on.
 - `iso_rx.c` parses with `net_buf_remove_*`, which consumes from the END of the
   buffer. The remove order (tx_ts, counter, trigger) is deliberate.
 - Controller-timed `led1` GPIO is the precision reference. Never use printk
@@ -59,6 +63,10 @@ via a software clock servo. UI docs are in Chinese; code/comments are English.
   instead. See the comment block in `prj.conf`.
 - Do not enable `CONFIG_LED_TOGGLE_IMMEDIATELY_ON_SEND_OR_RECEIVE` during
   precision captures (host GPIO toggles pollute the measurement).
+- The on-chip temperature path needs three things together: the `&temp` node
+  enabled in `boards/nrf54l15dk_nrf54l15_cpuapp.overlay`, `CONFIG_SENSOR=y`,
+  and the node itself. `CONFIG_TEMP_NRF5` and `CONFIG_TIME_SYNC_TEMP_COMP`
+  then default to y.
 
 ## Generated docs / artifacts
 - `gen_docs.py`, `gen_ppt.py`, `gen_onepage.py` regenerate the Chinese

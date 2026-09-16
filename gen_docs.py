@@ -122,7 +122,10 @@ for s in [
     "测量：meas = (int32_t)(tx_ts - local_ts)。两时钟同以 1MHz 回绕，32 位有符号差天然 wrap-safe，"
     "状态约束在 [-2^31, 2^31)，新息按 2^32 取模；",
     "预测/更新：标准 3×3 协方差 Kalman，过程噪声用离散 white-noise-jerk 模型（KF_JERK_PSD）；",
-    "抗离群：新息 |innov| > 6σ（或 > 100ms）直接丢弃，替代定窗的 trimmed mean；",
+    "温度自适应：q = KF_JERK_PSD·(1 + KF_TEMP_Q_GAIN·|dT/dt|)，每秒读片上 TEMP，"
+    "温度稳定时安静、变化时敏捷；",
+    "抗离群：Huber 软门限，归一化新息超过 3σ 后按 nu²/C² 膨胀 R（平滑降权），"
+    "仅 > 100ms 的粗差直接丢弃；",
     "映射：shared_ts = local + offset + drift×age + ½·drift-rate×age²，"
     "holdover 时按最后的 offset/drift/drift-rate 滑行。",
 ]:
@@ -150,9 +153,10 @@ doc.add_heading("3.5 源码文件", level=2)
 for s in [
     "src/iso_tx.c：SDU 组包 + 时间戳嵌入 + 发送端定时呈现；",
     "src/iso_rx.c：SDU 解析 + 时钟伺服接入 + 链路统计；",
-    "src/time_sync.c / include/time_sync.h：三状态 Kalman 时钟伺服；",
+    "src/time_sync.c / include/time_sync.h：三状态 Kalman 时钟伺服（Huber + 温度自适应）；",
     "src/sync_log.c / include/sync_log.h：延迟日志（消息队列 + 低优先级线程），"
     "避免串口阻塞收发回调；",
+    "src/temp_sensor.c：周期读取片上 TEMP，喂给时钟伺服；",
     "src/timed_led_toggle.c：GRTC + DPPI + GPIOTE 的 controller-timed 呈现；",
     "src/controller_time_nrf54.c：双 GRTC 比较通道；",
     "src/main.c：P1.09 上电选择收发角色。",

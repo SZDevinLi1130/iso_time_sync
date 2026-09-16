@@ -33,8 +33,11 @@ x = [ offset (µs), drift (µs/s), drift-rate (µs/s²) ]
   天然 wrap-safe；状态被约束在 `[-2^31, 2^31)`，新息按 2^32 取模。
 - 预测/更新：标准 3×3 协方差 Kalman，`F = [[1,dt,dt²/2],[0,1,dt],[0,0,1]]`，
   过程噪声用离散 white-noise-jerk 模型（`KF_JERK_PSD`）。
-- 抗离群：新息 `|innov| > KF_GATE_SIGMA·√S` 或 > 100 ms 直接丢弃，替代原来的
-  trimmed mean 百分位带。
+- 温度自适应过程噪声：`q = KF_JERK_PSD · (1 + KF_TEMP_Q_GAIN·|dT/dt|)`。
+  温度稳定时 q 小=安静，温度快速变化时 q 大=敏捷（`src/temp_sensor.c` 每秒读片上
+  TEMP 并调用 `time_sync_set_temperature()`；温度速率内部低通）。
+- 抗离群：Huber 软门限——归一化新息超过 `KF_HUBER_C`(3)σ 后按 `nu²/C²` 膨胀 R，
+  大偏差被平滑降权而非硬丢弃；只有 > 100 ms 的粗差才直接丢弃。
 - 映射：`shared(local) = local + offset + drift·age + 0.5·drift-rate·age²`，
   `age` 为距上次更新的本地时间；holdover 时按最后的 offset/drift/drift-rate 滑行。
 - `time_sync_to_shared()` 必须保持 32 位无符号 wrap-safe：不能混入本地 GRTC 64 位
@@ -61,6 +64,8 @@ x = [ offset (µs), drift (µs/s), drift-rate (µs/s²) ]
   `rejected` 是被离群门限丢弃的样本数。
 - `iso_rx_lt: t=...s received=... lost=... resync=...` 统计收到的 SDU、由 counter
   间隔估算的丢包数，以及大间隔（≥ 1 s）重同步次数。
+- `time_sync_temp: t=...s temp=...°C rate=...°C/s` 给出片上温度及其变化率，
+  便于把长期 drift/off_span 与温漂关联起来。
 - 另有 10 s 一次的 `time_sync:` 行给出即时 offset/drift/最大残差，便于观察收敛过程。
 
 长跑步骤：三块板（1 TX + 2 RX）持续运行 ≥ 1 小时，串口记录上述行，统计 offset
