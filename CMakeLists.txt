@@ -11,6 +11,10 @@ project(iso_time_sync)
 target_include_directories(app PRIVATE include)
 target_sources(app PRIVATE src/main.c src/timed_led_toggle.c src/time_sync.c src/sync_log.c)
 
+if(CONFIG_TIME_SYNC_TEMP_COMP)
+  target_sources(app PRIVATE src/temp_sensor.c)
+endif()
+
 if(CONFIG_BT_ISO_BROADCASTER)
   target_sources(app PRIVATE src/bis_transmitter.c)
 endif()

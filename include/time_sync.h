@@ -44,6 +44,18 @@ uint32_t time_sync_to_shared(uint32_t local_ts_us);
  */
 bool time_sync_is_locked(void);
 
+/**
+ * @brief Feed the current on-chip temperature to the servo.
+ *
+ * The filter scales its process noise with the temperature rate of change,
+ * so it tracks faster while the crystal is warming up/cooling down and stays
+ * quiet when the temperature is stable. Call it from any thread; the rate is
+ * low-pass filtered internally.
+ *
+ * @param celsius Temperature in degrees Celsius.
+ */
+void time_sync_set_temperature(double celsius);
+
 /** Servo statistics, sampled at the 10 s reporting cadence. */
 struct time_sync_stats {
 	bool locked;
@@ -69,6 +81,9 @@ struct time_sync_lt_stats {
 	int32_t off_span_us;  /**< max - min, the drift/temperature excursion. */
 	int32_t resid_max_us; /**< Worst |innovation| since the previous summary. */
 	uint32_t window_updates;
+	bool temp_valid;        /**< On-chip temperature has been sampled. */
+	int32_t temp_c_x100;    /**< Temperature, hundredths of a degree C. */
+	int32_t temp_rate_x1000;/**< Temperature rate, thousandths of C/s. */
 };
 
 /**

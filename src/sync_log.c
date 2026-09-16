@@ -79,7 +79,17 @@ static void sync_log_thread(void *a, void *b, void *c)
 			       it.u.stats.samples, it.u.stats.rejected,
 			       it.u.stats.resid_max_us);
 			break;
-		case SYNC_LOG_LT:
+		case SYNC_LOG_LT: {
+			int32_t tf = it.u.lt.temp_c_x100 % 100;
+			int32_t rf = it.u.lt.temp_rate_x1000 % 1000;
+
+			if (tf < 0) {
+				tf = -tf;
+			}
+			if (rf < 0) {
+				rf = -rf;
+			}
+
 			printk("time_sync_lt: t=%us samples=%u rejected=%u locked=%d "
 			       "offset=%d.%02d us drift=%d ppm off_min=%d us off_max=%d us "
 			       "off_span=%d us max_resid=%d us win_updates=%u\n",
@@ -88,9 +98,16 @@ static void sync_log_thread(void *a, void *b, void *c)
 			       it.u.lt.drift_ppm, it.u.lt.off_min_us, it.u.lt.off_max_us,
 			       it.u.lt.off_span_us, it.u.lt.resid_max_us,
 			       it.u.lt.window_updates);
+			if (it.u.lt.temp_valid) {
+				printk("time_sync_temp: t=%us temp=%d.%02d C "
+				       "rate=%d.%03d C/s\n",
+				       it.u.lt.uptime_s, it.u.lt.temp_c_x100 / 100, tf,
+				       it.u.lt.temp_rate_x1000 / 1000, rf);
+			}
 			printk("iso_rx_lt: t=%us received=%u lost=%u resync=%u\n",
 			       it.u.lt.uptime_s, it.received, it.lost, it.resync);
 			break;
+		}
 		default:
 			break;
 		}

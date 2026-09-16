@@ -41,6 +41,24 @@ config TIME_SYNC_LT_STATS_PERIOD_S
 	  (offset min/max/span, drift, worst residual, packet loss). Intended
 	  for long-run (>= 1 hour) verification of the shared timestamp.
 
+config TIME_SYNC_TEMP_COMP
+	bool "Temperature-adaptive servo process noise"
+	default y
+	depends on DT_HAS_NORDIC_NRF_TEMP_ENABLED
+	help
+	  Sample the on-chip temperature sensor and scale the Kalman filter's
+	  process noise with the temperature rate of change. The servo stays
+	  quiet when the crystal is thermally stable and tracks faster when the
+	  temperature is moving, which improves long-term stability.
+
+config TIME_SYNC_TEMP_PERIOD_MS
+	int "Temperature sampling period in milliseconds"
+	default 1000
+	range 100 60000
+	depends on TIME_SYNC_TEMP_COMP
+	help
+	  How often the on-chip temperature is sampled and fed to the servo.
+
 config BIS_TIME_SYNC_MEASURE_GPIO
 	bool "Expose controller-timed BIS presentation on GPIO"
 	default n

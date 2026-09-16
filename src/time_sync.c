@@ -55,9 +55,23 @@
 #define KF_P0_ACC          1.0e-2     /* initial drift-rate variance           */
 #define KF_LOCK_SAMPLES    64U        /* updates before the mapping is trusted */
 #define KF_MAX_DT_S        0.5        /* larger gap -> re-init the offset      */
-#define KF_GATE_SIGMA      6.0        /* reject |innov| > 6 sigma              */
-#define KF_REJECT_LIMIT_US 100000.0   /* hard reject beyond 100 ms             */
 #define KF_MAX_EXTRAP_S    10.0       /* cap the holdover extrapolation span   */
+
+/* Robust (Huber) measurement weighting. Beyond KF_HUBER_C sigma the effective
+ * measurement variance grows with the squared normalized innovation, so a
+ * large excursion is smoothly down-weighted instead of hard-rejected. A gross
+ * outlier beyond KF_REJECT_LIMIT_US is still discarded.
+ */
+#define KF_HUBER_C         3.0
+#define KF_HUBER_C2        (KF_HUBER_C * KF_HUBER_C)
+#define KF_REJECT_LIMIT_US 100000.0   /* hard reject beyond 100 ms             */
+
+/* Temperature-adaptive process noise: the jerk PSD is scaled by
+ * (1 + KF_TEMP_Q_GAIN * |dT/dt|), with dT/dt in degC/s. KF_TEMP_RATE_LPF
+ * low-passes the rate so a single noisy reading cannot spike Q.
+ */
+#define KF_TEMP_Q_GAIN     100.0
+#define KF_TEMP_RATE_LPF   0.8
 
 #define KF_TWO32 4294967296.0
 #define KF_TWO31 2147483648.0
@@ -76,6 +90,14 @@ static double ts_win_off_max;
 static bool ts_win_has_sample;
 static double ts_win_resid_max;
 static uint32_t ts_win_start_updates;
+
+/* On-chip temperature state, used to make the process noise track thermal
+ * transients. ts_temp_rate is in degC/s, low-pass filtered.
+ */
+static bool ts_temp_valid;
+static double ts_temp_last;
+static uint32_t ts_temp_last_ms;
+static double ts_temp_rate;
 
 /* Keep the offset within one 32-bit wrap of the raw controller time. */
 static double wrap_offset(double v)
@@ -142,6 +164,12 @@ static void kf_predict(double dt)
 	dt4 = dt3 * dt;
 	dt5 = dt4 * dt;
 	q = KF_JERK_PSD;
+	if (ts_temp_valid) {
+		/* Widen the process noise while the crystal is thermally moving. */
+		double tr = ts_temp_rate < 0.0 ? -ts_temp_rate : ts_temp_rate;
+
+		q *= 1.0 + KF_TEMP_Q_GAIN * tr;
+	}
 	kf_P[0][0] += q * dt5 / 20.0;
 	kf_P[0][1] += q * dt4 / 8.0;
 	kf_P[0][2] += q * dt3 / 6.0;
@@ -188,18 +216,27 @@ void time_sync_update(uint32_t tx_ts_us, uint32_t local_ts_us)
 			kf_updates++;
 			kf_locked = kf_updates >= KF_LOCK_SAMPLES;
 		} else {
-			double innov, S, K0, K1, K2, ares;
+			double innov, S, K0, K1, K2, ares, R_eff, nu2;
 			int j;
 
 			kf_predict(dt);
 
 			innov = wrap_offset(z - kf_x[0]);
-			S = kf_P[0][0] + KF_MEAS_VAR_US2;
 
-			if (innov * innov > KF_GATE_SIGMA * KF_GATE_SIGMA * S ||
-			    innov * innov > KF_REJECT_LIMIT_US * KF_REJECT_LIMIT_US) {
+			if (innov * innov > KF_REJECT_LIMIT_US * KF_REJECT_LIMIT_US) {
+				/* Gross outlier (resync): discard. */
 				kf_rejects++;
 			} else {
+				/* Huber: inflate R for large normalized innovations
+				 * so they are down-weighted, not hard-rejected.
+				 */
+				nu2 = innov * innov / (kf_P[0][0] + KF_MEAS_VAR_US2);
+				R_eff = KF_MEAS_VAR_US2;
+				if (nu2 > KF_HUBER_C2) {
+					R_eff = KF_MEAS_VAR_US2 * nu2 / KF_HUBER_C2;
+				}
+				S = kf_P[0][0] + R_eff;
+
 				K0 = kf_P[0][0] / S;
 				K1 = kf_P[1][0] / S;
 				K2 = kf_P[2][0] / S;
@@ -282,6 +319,26 @@ bool time_sync_is_locked(void)
 	return kf_locked;
 }
 
+void time_sync_set_temperature(double celsius)
+{
+	uint32_t now = (uint32_t)k_uptime_get();
+
+	if (ts_temp_valid) {
+		double dt_s = (double)(now - ts_temp_last_ms) * 1e-3;
+
+		if (dt_s > 0.0) {
+			double rate = (celsius - ts_temp_last) / dt_s;
+
+			ts_temp_rate = KF_TEMP_RATE_LPF * ts_temp_rate +
+				       (1.0 - KF_TEMP_RATE_LPF) * rate;
+		}
+	}
+
+	ts_temp_last = celsius;
+	ts_temp_last_ms = now;
+	ts_temp_valid = true;
+}
+
 static void off_parts(double off, int32_t *int_us, int32_t *frac_100)
 {
 	double v = off * 100.0;
@@ -330,6 +387,9 @@ void time_sync_lt_stats_snapshot(struct time_sync_lt_stats *out)
 	out->off_span_us = mx - mn;
 	out->resid_max_us = round_us(ts_win_resid_max);
 	out->window_updates = kf_updates - ts_win_start_updates;
+	out->temp_valid = ts_temp_valid;
+	out->temp_c_x100 = round_us(ts_temp_last * 100.0);
+	out->temp_rate_x1000 = round_us(ts_temp_rate * 1000.0);
 
 	/* Start a fresh window. */
 	ts_win_has_sample = false;

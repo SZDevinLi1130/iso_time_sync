@@ -1,0 +1,8 @@
+/*
+ * Enable the on-chip temperature sensor. It feeds the temperature-adaptive
+ * Kalman process noise (CONFIG_TIME_SYNC_TEMP_COMP).
+ */
+
+&temp {
+	status = "okay";
+};
