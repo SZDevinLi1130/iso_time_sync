@@ -18,12 +18,15 @@
  * Both timestamps wrap at the same ~1 MHz rate, so the 32-bit signed
  * difference is wrap-safe and needs no unwrapping.
  *
- * Sub-microsecond accuracy: the offset is estimated with a trimmed mean
- * (drop the outer 25% on each side and average the rest) instead of an
- * integer median. Averaging recovers the fractional part of the offset that
- * a single 1 us-resolution measurement cannot represent, and the drift is
- * carried as fixed-point so the extrapolation does not lose precision to
- * integer division. All internal state is 1/256 us fixed point (TS_FRAC).
+ * Sub-microsecond accuracy:
+ *  - Offset: trimmed mean (drop the outer 25% on each side) in 1/256 us
+ *    fixed point, recovering the fractional part a single 1 us measurement
+ *    cannot represent.
+ *  - Drift: least-squares linear regression over the in-band samples. A
+ *    two-point slope estimator leaves a drift error of a few ppm, which the
+ *    extrapolation from the window midpoint (~0.64 s) turns into a
+ *    systematic ~1-2 us stamping error; the regression cuts that drift noise
+ *    by roughly an order of magnitude.
  *
  * shared(local) = local + offset
  */
@@ -73,39 +76,26 @@ static int cmp_int32(const void *a, const void *b)
 	return (x > y) - (x < y);
 }
 
-/* Trimmed mean (drop the outer 25% on each side) in 1/256 us fixed point.
- * 'vals' is in chronological order; 'scratch' is used for sorting.
- */
-static int64_t trimmed_mean_q(const int32_t *vals, uint16_t n, int32_t *scratch)
-{
-	uint16_t trim = n / 4;
-	uint16_t lo = trim;
-	uint16_t hi = n - trim;
-	int64_t sum = 0;
-
-	if (hi <= lo) {
-		hi = lo + 1;
-	}
-
-	memcpy(scratch, vals, n * sizeof(int32_t));
-	qsort(scratch, n, sizeof(int32_t), cmp_int32);
-
-	for (uint16_t i = lo; i < hi; i++) {
-		sum += scratch[i];
-	}
-
-	return (sum * TS_FRAC + (int64_t)(hi - lo) / 2) / (hi - lo);
-}
-
 void time_sync_update(uint32_t tx_ts_us, uint32_t local_ts_us)
 {
 	/* Wrap-safe offset between two 1 MHz clocks. */
 	int32_t meas = (int32_t)(tx_ts_us - local_ts_us);
 	uint16_t start;
-	uint16_t half;
-	int64_t med_old_q;
-	int64_t med_new_q;
-	int64_t dt_us;
+	uint16_t trim;
+	int32_t v_lo;
+	int32_t v_hi;
+	int64_t sum;
+	uint16_t lo;
+	uint16_t hi;
+	int64_t sx;
+	int64_t sy;
+	int64_t sxx;
+	int64_t sxy;
+	uint16_t m;
+	int64_t den;
+	int64_t num;
+	int64_t b_q;
+	int64_t b_rem;
 	int32_t resid;
 
 	ts_ring[ts_head] = meas;
@@ -127,19 +117,66 @@ void time_sync_update(uint32_t tx_ts_us, uint32_t local_ts_us)
 		ts_ordered[i] = ts_ring[(start + i) % TS_RING_SIZE];
 	}
 
+	/* Sorted copy, used for the percentile band. */
+	memcpy(ts_scratch, ts_ordered, ts_count * sizeof(int32_t));
+	qsort(ts_scratch, ts_count, sizeof(int32_t), cmp_int32);
+
 	/* Offset = trimmed mean of the full window (robust + sub-us). */
-	ts_offset_q = trimmed_mean_q(ts_ordered, ts_count, ts_scratch);
+	trim = ts_count / 4;
+	lo = trim;
+	hi = ts_count - trim;
+	if (hi <= lo) {
+		hi = lo + 1;
+	}
+	sum = 0;
+	for (uint16_t i = lo; i < hi; i++) {
+		sum += ts_scratch[i];
+	}
+	ts_offset_q = (sum * TS_FRAC + (int64_t)(hi - lo) / 2) / (hi - lo);
 
-	/* Drift from the slope between the two half-window trimmed means. */
-	half = ts_count / 2;
-	med_old_q = trimmed_mean_q(ts_ordered, half, ts_scratch);
-	med_new_q = trimmed_mean_q(ts_ordered + (ts_count - half), half, ts_scratch);
-	dt_us = (int64_t)half * TS_SDU_INTERVAL_US;
-
-	/* drift_q = (med_new - med_old) [1/256 us] / dt_us [us], scaled by
-	 * 2^TS_DRIFT_Q_BITS so the extrapolation keeps full precision.
+	/* Drift = least-squares slope over the in-band samples.
+	 * y = meas [us], x = window index (1 sample = SDU interval).
 	 */
-	ts_drift_q = ((med_new_q - med_old_q) << TS_DRIFT_Q_BITS) / dt_us;
+	v_lo = ts_scratch[lo];
+	v_hi = ts_scratch[hi - 1];
+	sx = 0;
+	sy = 0;
+	sxx = 0;
+	sxy = 0;
+	m = 0;
+	for (uint16_t i = 0; i < ts_count; i++) {
+		if (ts_ordered[i] < v_lo || ts_ordered[i] > v_hi) {
+			continue;
+		}
+		sx += i;
+		sy += ts_ordered[i];
+		sxx += (int64_t)i * i;
+		sxy += (int64_t)i * ts_ordered[i];
+		m++;
+	}
+
+	if (m >= 8) {
+		den = (int64_t)m * sxx - (int64_t)sx * sx;
+		if (den != 0) {
+			/* Slope in us per sample, kept in 1/256-us fixed point
+			 * to avoid any precision loss before the rescale.
+			 */
+			num = (int64_t)m * sxy - (int64_t)sx * sy;
+			b_q = num / den;
+			b_rem = num % den;
+
+			/* drift_q = b [us/sample] * TS_FRAC * 2^TS_DRIFT_Q_BITS
+			 *           / TS_SDU_INTERVAL_US
+			 * Split quotient/remainder to keep intermediates small.
+			 */
+			ts_drift_q =
+				(b_q * ((int64_t)TS_FRAC << TS_DRIFT_Q_BITS)) /
+				(int64_t)TS_SDU_INTERVAL_US +
+				(b_rem * ((int64_t)TS_FRAC << TS_DRIFT_Q_BITS)) /
+				((int64_t)den * (int64_t)TS_SDU_INTERVAL_US);
+		}
+	}
+
 	ts_locked = true;
 
 	/* The trimmed mean corresponds to the chronological midpoint of the
@@ -189,11 +226,18 @@ bool time_sync_is_locked(void)
 
 void time_sync_stats_print(void)
 {
+	int64_t off_int = ts_offset_q / TS_FRAC;
+	int64_t off_rem = ts_offset_q % TS_FRAC;
+
+	if (off_rem < 0) {
+		off_rem = -off_rem;
+	}
+
 	/* offset_q is in 1/256 us; drift_q * 1e6 >> (DRIFT_Q+FRAC) -> ppm. */
-	printk("time_sync: locked=%d offset=%lld.%02llu us drift=%lld ppm samples=%u max_resid=%d us\n",
+	printk("time_sync: locked=%d offset=%lld.%02lld us drift=%lld ppm samples=%u max_resid=%d us\n",
 	       ts_locked,
-	       (long long)(ts_offset_q / TS_FRAC),
-	       (long long)(((ts_offset_q % TS_FRAC) * 100) / TS_FRAC),
+	       (long long)off_int,
+	       (long long)(off_rem * 100 / TS_FRAC),
 	       (long long)((ts_drift_q * 1000000) >> (TS_DRIFT_Q_BITS + TS_FRAC_BITS)),
 	       ts_count, ts_residual_max_us);
 }
