@@ -44,16 +44,44 @@ uint32_t time_sync_to_shared(uint32_t local_ts_us);
  */
 bool time_sync_is_locked(void);
 
-/** @brief Print servo statistics (offset, drift, lock state). */
-void time_sync_stats_print(void);
+/** Servo statistics, sampled at the 10 s reporting cadence. */
+struct time_sync_stats {
+	bool locked;
+	uint32_t samples;     /**< Accepted updates since boot. */
+	uint32_t rejected;    /**< Samples rejected as outliers since boot. */
+	int32_t offset_us;    /**< Estimated offset, integer part (us). */
+	int32_t offset_frac;  /**< Offset hundredths of a us, 0..99. */
+	int32_t drift_ppm;    /**< Estimated drift (us/s == ppm). */
+	int32_t resid_max_us; /**< Worst |innovation| in the current window. */
+};
 
-/** @brief Print a long-term stability summary and start a new window.
- *
- * Prints uptime, offset, drift, the min/max/span of the offset estimate
- * observed since the previous call, and the worst residual in that window.
- * Intended for long-run (>= 1 hour) verification. Safe to call from the
- * Bluetooth RX workqueue.
+/** Long-term stability summary, sampled at the LT reporting cadence. */
+struct time_sync_lt_stats {
+	uint32_t uptime_s;
+	uint32_t samples;
+	uint32_t rejected;
+	bool locked;
+	int32_t offset_us;
+	int32_t offset_frac;
+	int32_t drift_ppm;
+	int32_t off_min_us;   /**< Min offset seen since the previous summary. */
+	int32_t off_max_us;   /**< Max offset seen since the previous summary. */
+	int32_t off_span_us;  /**< max - min, the drift/temperature excursion. */
+	int32_t resid_max_us; /**< Worst |innovation| since the previous summary. */
+	uint32_t window_updates;
+};
+
+/**
+ * @brief Read the current servo statistics without changing filter state.
  */
-void time_sync_lt_stats_print(void);
+void time_sync_stats_snapshot(struct time_sync_stats *out);
+
+/**
+ * @brief Read the long-term stability summary and start a new window.
+ *
+ * Safe to call from the Bluetooth RX workqueue; the reporting window is
+ * reset so the next summary covers a fresh interval.
+ */
+void time_sync_lt_stats_snapshot(struct time_sync_lt_stats *out);
 
 #endif /* TIME_SYNC_H__ */

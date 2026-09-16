@@ -7,308 +7,332 @@
 /**
  * @file time_sync.c
  *
- * Clock servo that maps the local GRTC timebase onto the broadcaster's
- * controller timebase.
+ * Three-state Kalman filter that maps the local GRTC timebase onto the
+ * broadcaster's controller timebase.
  *
  * Each valid SDU gives a reference pair (tx_ts, local_ts): two readings of
- * the same physical instant in two different free-running clocks. The offset
- * between the two clocks (tx_ts - local_ts) is estimated robustly, and the
- * drift rate (ppm) is estimated from the slope of that offset.
+ * the same physical instant in two free-running 1 MHz clocks. The filter
+ * estimates
  *
- * Both timestamps wrap at the same ~1 MHz rate, so the 32-bit signed
- * difference is wrap-safe and needs no unwrapping.
+ *     x = [ offset (us), drift (us/s), drift-rate (us/s^2) ]
  *
- * Sub-microsecond accuracy:
- *  - Offset: trimmed mean (drop the outer 25% on each side) in 1/256 us
- *    fixed point, recovering the fractional part a single 1 us measurement
- *    cannot represent.
- *  - Drift: least-squares linear regression over the in-band samples. A
- *    two-point slope estimator leaves a drift error of a few ppm, which the
- *    extrapolation from the window midpoint (~0.64 s) turns into a
- *    systematic ~1-2 us stamping error; the regression cuts that drift noise
- *    by roughly an order of magnitude.
+ * and maps local -> shared with a second-order extrapolation from the last
+ * update:
  *
- * shared(local) = local + offset
+ *     shared(t) = t + offset + drift*age + 0.5*drift_rate*age^2
+ *
+ * Why a Kalman filter instead of a fixed window:
+ *  - The measurement noise (1 us GRTC quantization plus path jitter) and the
+ *    clock's slow drift/temperature wander are handled with an explicit noise
+ *    model, so the filter balances noise averaging against tracking lag
+ *    automatically instead of using a hard-coded window length.
+ *  - The drift-rate state tracks temperature-induced frequency ramps and
+ *    improves holdover: when the BIG is lost the mapping keeps running with
+ *    the last offset/drift/drift-rate.
+ *  - The innovation is gated (|innov| > KF_GATE_SIGMA * sqrt(S)), so packet
+ *    loss / retransmission outliers are rejected before they reach the state.
+ *
+ * Both clocks wrap at the same ~1 MHz rate, so the offset is an unsigned
+ * 32-bit quantity modulo 2^32. All offset arithmetic is wrap-safe: the state
+ * is kept within [-2^31, 2^31) and the innovation is reduced modulo 2^32.
+ *
+ * All state is static (the filter runs in the Bluetooth RX workqueue whose
+ * stack is small). Floating point is used for clarity; the build does not
+ * enable the FPU, so this is soft-float, which is negligible at 200 Hz.
+ *
+ * The KF_* tuning constants below are initial estimates. Refine them with the
+ * offline Allan/TDEV analysis described in BIS_TIME_SYNC_CONTEXT.md.
  */
 
 #include <zephyr/kernel.h>
-#include <stdlib.h>
-#include <string.h>
 #include "time_sync.h"
 
-/* Short window: the offset reference stays fresh (extrapolation span is
- * only half the window), which keeps the stamping residual caused by the
- * non-linear short-term wander of the two GRTC clocks well below 1 us.
- * Window 128 samples = 0.64 s at the 5 ms SDU interval.
- */
-#define TS_RING_SIZE         128
-#define TS_MIN_LOCK_SAMPLES  64
-#define TS_SDU_INTERVAL_US   5000UL    /* nominal SDU interval (see prj.conf) */
+/* ---- Filter tuning -------------------------------------------------------- */
+#define KF_MEAS_VAR_US2    1.0        /* R: measurement noise variance (us^2)  */
+#define KF_JERK_PSD        1e-7       /* q: jerk process-noise PSD             */
+#define KF_P0_OFFSET_US2   1.0e4      /* initial offset variance (us^2)        */
+#define KF_P0_DRIFT       (20.0 * 20.0) /* initial drift variance (us/s)^2     */
+#define KF_P0_ACC          1.0e-2     /* initial drift-rate variance           */
+#define KF_LOCK_SAMPLES    64U        /* updates before the mapping is trusted */
+#define KF_MAX_DT_S        0.5        /* larger gap -> re-init the offset      */
+#define KF_GATE_SIGMA      6.0        /* reject |innov| > 6 sigma              */
+#define KF_REJECT_LIMIT_US 100000.0   /* hard reject beyond 100 ms             */
+#define KF_MAX_EXTRAP_S    10.0       /* cap the holdover extrapolation span   */
 
-/* Fixed-point scales.
- * offset is kept in 1/256 us (TS_FRAC_BITS); drift is kept as
- * (1/256 us) per (2^TS_DRIFT_Q_BITS us), so the extrapolation is a
- * 64-bit multiply + shift with no integer-division truncation.
- */
-#define TS_FRAC_BITS         8
-#define TS_FRAC              (1 << TS_FRAC_BITS)
-#define TS_DRIFT_Q_BITS      12
+#define KF_TWO32 4294967296.0
+#define KF_TWO31 2147483648.0
 
-static int32_t ts_ring[TS_RING_SIZE];
-static uint32_t ts_local_ring[TS_RING_SIZE]; /* local ts of each sample */
-static uint16_t ts_count;
-static uint16_t ts_head; /* index of the oldest sample */
+static double kf_x[3];
+static double kf_P[3][3];
+static uint32_t kf_last_local;
+static bool kf_initialized;
+static uint32_t kf_updates;
+static uint32_t kf_rejects;
+static bool kf_locked;
 
-/* Working buffers, file-scoped rather than on the call stack:
- * time_sync_update() runs in the BT RX workqueue whose stack is small.
- */
-static int32_t ts_scratch[TS_RING_SIZE];
-static int32_t ts_ordered[TS_RING_SIZE];
-
-static bool ts_locked;
-static int64_t ts_offset_q;  /* offset in 1/256 us (valid at ts_ref_local) */
-static int64_t ts_drift_q;   /* drift: (1/256 us) per (2^TS_DRIFT_Q_BITS us) */
-static uint32_t ts_ref_local;
-
-static uint32_t ts_update_cnt;
-static int32_t ts_residual_max_us;
-
-/* Long-term verification window: min/max of the offset estimate and the worst
- * residual observed since the previous time_sync_lt_stats_print(). The offset
- * is kept in 1/256 us fixed point, the residual in us.
- */
-static int64_t ts_win_off_min_q;
-static int64_t ts_win_off_max_q;
+/* Reporting window since the previous time_sync_lt_stats_snapshot(). */
+static double ts_win_off_min;
+static double ts_win_off_max;
 static bool ts_win_has_sample;
-static int32_t ts_win_resid_max_us;
-static uint32_t ts_win_start_cnt;
+static double ts_win_resid_max;
+static uint32_t ts_win_start_updates;
 
-static int cmp_int32(const void *a, const void *b)
+/* Keep the offset within one 32-bit wrap of the raw controller time. */
+static double wrap_offset(double v)
 {
-	int32_t x = *(const int32_t *)a;
-	int32_t y = *(const int32_t *)b;
+	if (v >= KF_TWO31) {
+		v -= KF_TWO32;
+	} else if (v < -KF_TWO31) {
+		v += KF_TWO32;
+	}
+	return v;
+}
 
-	return (x > y) - (x < y);
+static void kf_reset_covariance(void)
+{
+	kf_P[0][0] = KF_P0_OFFSET_US2;
+	kf_P[0][1] = 0.0;
+	kf_P[0][2] = 0.0;
+	kf_P[1][0] = 0.0;
+	kf_P[1][1] = KF_P0_DRIFT;
+	kf_P[1][2] = 0.0;
+	kf_P[2][0] = 0.0;
+	kf_P[2][1] = 0.0;
+	kf_P[2][2] = KF_P0_ACC;
+}
+
+/* x = F x; P = F P F^T + Q, with F = [[1, dt, dt^2/2], [0, 1, dt], [0, 0, 1]]
+ * and Q the discrete white-noise-jerk model.
+ */
+static void kf_predict(double dt)
+{
+	double hh = 0.5 * dt * dt;
+	double t00, t01, t02, t10, t11, t12, t20, t21, t22;
+	double dt2, dt3, dt4, dt5, q;
+
+	/* x = F x (drift-rate state is unchanged). */
+	kf_x[0] = kf_x[0] + kf_x[1] * dt + kf_x[2] * hh;
+	kf_x[1] = kf_x[1] + kf_x[2] * dt;
+
+	/* T = F P. */
+	t00 = kf_P[0][0] + dt * kf_P[1][0] + hh * kf_P[2][0];
+	t01 = kf_P[0][1] + dt * kf_P[1][1] + hh * kf_P[2][1];
+	t02 = kf_P[0][2] + dt * kf_P[1][2] + hh * kf_P[2][2];
+	t10 = kf_P[1][0] + dt * kf_P[2][0];
+	t11 = kf_P[1][1] + dt * kf_P[2][1];
+	t12 = kf_P[1][2] + dt * kf_P[2][2];
+	t20 = kf_P[2][0];
+	t21 = kf_P[2][1];
+	t22 = kf_P[2][2];
+
+	/* P = T F^T. */
+	kf_P[0][0] = t00 + dt * t01 + hh * t02;
+	kf_P[0][1] = t01 + dt * t02;
+	kf_P[0][2] = t02;
+	kf_P[1][0] = t10 + dt * t11 + hh * t12;
+	kf_P[1][1] = t11 + dt * t12;
+	kf_P[1][2] = t12;
+	kf_P[2][0] = t20 + dt * t21 + hh * t22;
+	kf_P[2][1] = t21 + dt * t22;
+	kf_P[2][2] = t22;
+
+	/* P += Q. */
+	dt2 = dt * dt;
+	dt3 = dt2 * dt;
+	dt4 = dt3 * dt;
+	dt5 = dt4 * dt;
+	q = KF_JERK_PSD;
+	kf_P[0][0] += q * dt5 / 20.0;
+	kf_P[0][1] += q * dt4 / 8.0;
+	kf_P[0][2] += q * dt3 / 6.0;
+	kf_P[1][0] += q * dt4 / 8.0;
+	kf_P[1][1] += q * dt3 / 3.0;
+	kf_P[1][2] += q * dt2 / 2.0;
+	kf_P[2][0] += q * dt3 / 6.0;
+	kf_P[2][1] += q * dt2 / 2.0;
+	kf_P[2][2] += q * dt;
 }
 
 void time_sync_update(uint32_t tx_ts_us, uint32_t local_ts_us)
 {
-	/* Wrap-safe offset between two 1 MHz clocks. */
-	int32_t meas = (int32_t)(tx_ts_us - local_ts_us);
-	uint16_t start;
-	uint16_t trim;
-	int32_t v_lo;
-	int32_t v_hi;
-	int64_t sum;
-	uint16_t lo;
-	uint16_t hi;
-	int64_t sx;
-	int64_t sy;
-	int64_t sxx;
-	int64_t sxy;
-	uint16_t m;
-	int64_t den;
-	int64_t num;
-	int64_t b_q;
-	int64_t b_rem;
-	int32_t resid;
+	/* Wrap-safe measurement: two readings of the same instant. */
+	double z = (double)(int32_t)(tx_ts_us - local_ts_us);
 
-	ts_ring[ts_head] = meas;
-	ts_local_ring[ts_head] = local_ts_us;
-	ts_head = (ts_head + 1) % TS_RING_SIZE;
-	if (ts_count < TS_RING_SIZE) {
-		ts_count++;
-	}
+	if (!kf_initialized) {
+		kf_x[0] = z;
+		kf_x[1] = 0.0;
+		kf_x[2] = 0.0;
+		kf_reset_covariance();
+		kf_last_local = local_ts_us;
+		kf_initialized = true;
+		kf_updates = 1;
+	} else {
+		int32_t dts = (int32_t)(local_ts_us - kf_last_local);
+		double dt = (double)dts * 1e-6;
 
-	ts_update_cnt++;
-
-	if (ts_count < TS_MIN_LOCK_SAMPLES) {
-		return;
-	}
-
-	/* Copy the ring into chronological order (oldest first). */
-	start = (ts_head + TS_RING_SIZE - ts_count) % TS_RING_SIZE;
-	for (uint16_t i = 0; i < ts_count; i++) {
-		ts_ordered[i] = ts_ring[(start + i) % TS_RING_SIZE];
-	}
-
-	/* Sorted copy, used for the percentile band. */
-	memcpy(ts_scratch, ts_ordered, ts_count * sizeof(int32_t));
-	qsort(ts_scratch, ts_count, sizeof(int32_t), cmp_int32);
-
-	/* Offset = trimmed mean of the full window (robust + sub-us). */
-	trim = ts_count / 4;
-	lo = trim;
-	hi = ts_count - trim;
-	if (hi <= lo) {
-		hi = lo + 1;
-	}
-	sum = 0;
-	for (uint16_t i = lo; i < hi; i++) {
-		sum += ts_scratch[i];
-	}
-	ts_offset_q = (sum * TS_FRAC + (int64_t)(hi - lo) / 2) / (hi - lo);
-
-	/* Drift = least-squares slope over the in-band samples.
-	 * y = meas [us], x = window index (1 sample = SDU interval).
-	 */
-	v_lo = ts_scratch[lo];
-	v_hi = ts_scratch[hi - 1];
-	sx = 0;
-	sy = 0;
-	sxx = 0;
-	sxy = 0;
-	m = 0;
-	for (uint16_t i = 0; i < ts_count; i++) {
-		if (ts_ordered[i] < v_lo || ts_ordered[i] > v_hi) {
-			continue;
+		if (dt <= 0.0) {
+			/* Duplicate or out-of-order sample: ignore. */
+			return;
 		}
-		sx += i;
-		sy += ts_ordered[i];
-		sxx += (int64_t)i * i;
-		sxy += (int64_t)i * ts_ordered[i];
-		m++;
-	}
 
-	if (m >= 8) {
-		den = (int64_t)m * sxx - (int64_t)sx * sx;
-		if (den != 0) {
-			/* Slope in us per sample, kept in 1/256-us fixed point
-			 * to avoid any precision loss before the rescale.
+		if (dt > KF_MAX_DT_S) {
+			/* BIG lost or re-synced: restart the offset, keep the
+			 * drift estimate and widen the covariance so the filter
+			 * re-converges quickly.
 			 */
-			num = (int64_t)m * sxy - (int64_t)sx * sy;
-			b_q = num / den;
-			b_rem = num % den;
+			kf_x[0] = z;
+			kf_P[0][0] += KF_P0_OFFSET_US2;
+			kf_P[1][1] += KF_P0_DRIFT;
+			kf_P[2][2] += KF_P0_ACC;
+			kf_last_local = local_ts_us;
+			kf_updates++;
+			kf_locked = kf_updates >= KF_LOCK_SAMPLES;
+		} else {
+			double innov, S, K0, K1, K2, ares;
+			int j;
 
-			/* drift_q = b [us/sample] * TS_FRAC * 2^TS_DRIFT_Q_BITS
-			 *           / TS_SDU_INTERVAL_US
-			 * Split quotient/remainder to keep intermediates small.
-			 */
-			ts_drift_q =
-				(b_q * ((int64_t)TS_FRAC << TS_DRIFT_Q_BITS)) /
-				(int64_t)TS_SDU_INTERVAL_US +
-				(b_rem * ((int64_t)TS_FRAC << TS_DRIFT_Q_BITS)) /
-				((int64_t)den * (int64_t)TS_SDU_INTERVAL_US);
+			kf_predict(dt);
+
+			innov = wrap_offset(z - kf_x[0]);
+			S = kf_P[0][0] + KF_MEAS_VAR_US2;
+
+			if (innov * innov > KF_GATE_SIGMA * KF_GATE_SIGMA * S ||
+			    innov * innov > KF_REJECT_LIMIT_US * KF_REJECT_LIMIT_US) {
+				kf_rejects++;
+			} else {
+				K0 = kf_P[0][0] / S;
+				K1 = kf_P[1][0] / S;
+				K2 = kf_P[2][0] / S;
+
+				kf_x[0] += K0 * innov;
+				kf_x[1] += K1 * innov;
+				kf_x[2] += K2 * innov;
+
+				/* P = (I - K H) P. */
+				for (j = 0; j < 3; j++) {
+					double p0j = kf_P[0][j];
+
+					kf_P[0][j] -= K0 * p0j;
+					kf_P[1][j] -= K1 * p0j;
+					kf_P[2][j] -= K2 * p0j;
+				}
+				/* Re-symmetrize against numerical drift. */
+				kf_P[0][1] = kf_P[1][0];
+				kf_P[0][2] = kf_P[2][0];
+				kf_P[1][2] = kf_P[2][1];
+
+				ares = innov < 0.0 ? -innov : innov;
+				if (ares > ts_win_resid_max) {
+					ts_win_resid_max = ares;
+				}
+			}
+
+			kf_x[0] = wrap_offset(kf_x[0]);
+			kf_last_local = local_ts_us;
+			kf_updates++;
+			if (!kf_locked && kf_updates >= KF_LOCK_SAMPLES) {
+				kf_locked = true;
+			}
 		}
 	}
 
-	ts_locked = true;
-
-	/* The trimmed mean corresponds to the chronological midpoint of the
-	 * window; remember its local timestamp so to_shared() can extrapolate
-	 * the drift forward to the current instant.
-	 */
-	ts_ref_local = ts_local_ring[(start + ts_count / 2) % TS_RING_SIZE];
-
-	resid = meas - (int32_t)(ts_offset_q / TS_FRAC);
-	if (resid < 0) {
-		resid = -resid;
-	}
-	if (resid > ts_residual_max_us) {
-		ts_residual_max_us = resid;
-	}
-
-	/* Track the offset excursion and worst residual for the long-term
-	 * stability summary.
-	 */
+	/* Reporting window: offset excursion since the last LT snapshot. */
 	if (!ts_win_has_sample) {
-		ts_win_off_min_q = ts_offset_q;
-		ts_win_off_max_q = ts_offset_q;
+		ts_win_off_min = kf_x[0];
+		ts_win_off_max = kf_x[0];
 		ts_win_has_sample = true;
 	} else {
-		if (ts_offset_q < ts_win_off_min_q) {
-			ts_win_off_min_q = ts_offset_q;
+		if (kf_x[0] < ts_win_off_min) {
+			ts_win_off_min = kf_x[0];
 		}
-		if (ts_offset_q > ts_win_off_max_q) {
-			ts_win_off_max_q = ts_offset_q;
+		if (kf_x[0] > ts_win_off_max) {
+			ts_win_off_max = kf_x[0];
 		}
-	}
-	if (resid > ts_win_resid_max_us) {
-		ts_win_resid_max_us = resid;
 	}
 }
 
 uint32_t time_sync_to_shared(uint32_t local_ts_us)
 {
-	int64_t offset_q = ts_offset_q;
+	int32_t age;
+	double age_s, off;
+	int32_t off_i;
 
-	if (ts_locked) {
-		/* Extrapolate the drift from the reference instant (window
-		 * midpoint) to the current instant. This also covers holdover,
-		 * since age keeps growing while no updates arrive.
-		 */
-		int32_t age_us = (int32_t)(local_ts_us - ts_ref_local);
-
-		offset_q += (ts_drift_q * age_us) >> TS_DRIFT_Q_BITS;
+	if (!kf_locked) {
+		return local_ts_us;
 	}
 
-	/* Wrap-safe unsigned 32-bit mapping: both clocks run at the same
-	 * ~1 MHz rate, so the (possibly negative) offset is applied modulo
-	 * 2^32. Keeping the result unsigned matches the TX-side prints even
-	 * after the raw controller time passes 2^31 (~35.8 min), where a
-	 * signed interpretation would go negative.
-	 */
-	int32_t offset_us = (int32_t)((offset_q + TS_FRAC / 2) / TS_FRAC);
+	/* Extrapolate from the last update (also covers holdover). */
+	age = (int32_t)(local_ts_us - kf_last_local);
+	age_s = (double)age * 1e-6;
+	if (age_s > KF_MAX_EXTRAP_S) {
+		age_s = KF_MAX_EXTRAP_S;
+	} else if (age_s < -KF_MAX_EXTRAP_S) {
+		age_s = -KF_MAX_EXTRAP_S;
+	}
 
-	return local_ts_us + (uint32_t)offset_us;
+	off = kf_x[0] + kf_x[1] * age_s + 0.5 * kf_x[2] * age_s * age_s;
+	off_i = (int32_t)(off >= 0.0 ? off + 0.5 : off - 0.5);
+
+	/* Wrap-safe unsigned mapping, same modulus as the TX timestamps. */
+	return local_ts_us + (uint32_t)off_i;
 }
 
 bool time_sync_is_locked(void)
 {
-	return ts_locked;
+	return kf_locked;
 }
 
-void time_sync_stats_print(void)
+static void off_parts(double off, int32_t *int_us, int32_t *frac_100)
 {
-	int64_t off_int = ts_offset_q / TS_FRAC;
-	int64_t off_rem = ts_offset_q % TS_FRAC;
+	double v = off * 100.0;
+	long long r = (long long)(v >= 0.0 ? v + 0.5 : v - 0.5);
+	int32_t f = (int32_t)(r % 100);
 
-	if (off_rem < 0) {
-		off_rem = -off_rem;
-	}
-
-	/* offset_q is in 1/256 us; drift_q * 1e6 >> (DRIFT_Q+FRAC) -> ppm. */
-	printk("time_sync: locked=%d offset=%lld.%02lld us drift=%lld ppm samples=%u max_resid=%d us\n",
-	       ts_locked,
-	       (long long)off_int,
-	       (long long)(off_rem * 100 / TS_FRAC),
-	       (long long)((ts_drift_q * 1000000) >> (TS_DRIFT_Q_BITS + TS_FRAC_BITS)),
-	       ts_count, ts_residual_max_us);
+	*int_us = (int32_t)(r / 100);
+	*frac_100 = f < 0 ? -f : f;
 }
 
-void time_sync_lt_stats_print(void)
+static int32_t round_us(double v)
 {
-	uint32_t uptime_s = (uint32_t)(k_uptime_get() / 1000);
-	int64_t off_int = ts_offset_q / TS_FRAC;
-	int64_t off_rem = ts_offset_q % TS_FRAC;
-	int64_t off_min_q = ts_win_has_sample ? ts_win_off_min_q : ts_offset_q;
-	int64_t off_max_q = ts_win_has_sample ? ts_win_off_max_q : ts_offset_q;
-	uint32_t window_updates = ts_update_cnt - ts_win_start_cnt;
+	return (int32_t)(v >= 0.0 ? v + 0.5 : v - 0.5);
+}
 
-	if (off_rem < 0) {
-		off_rem = -off_rem;
+void time_sync_stats_snapshot(struct time_sync_stats *out)
+{
+	out->locked = kf_locked;
+	out->samples = kf_updates;
+	out->rejected = kf_rejects;
+	off_parts(kf_x[0], &out->offset_us, &out->offset_frac);
+	out->drift_ppm = round_us(kf_x[1]);
+	out->resid_max_us = round_us(ts_win_resid_max);
+}
+
+void time_sync_lt_stats_snapshot(struct time_sync_lt_stats *out)
+{
+	int32_t mn, mx;
+
+	out->uptime_s = (uint32_t)(k_uptime_get() / 1000);
+	out->samples = kf_updates;
+	out->rejected = kf_rejects;
+	out->locked = kf_locked;
+	off_parts(kf_x[0], &out->offset_us, &out->offset_frac);
+	out->drift_ppm = round_us(kf_x[1]);
+
+	if (ts_win_has_sample) {
+		mn = round_us(ts_win_off_min);
+		mx = round_us(ts_win_off_max);
+	} else {
+		mn = round_us(kf_x[0]);
+		mx = mn;
 	}
-
-	/* One line per reporting window for long-run (>= 1 hour) verification:
-	 * absolute offset/drift, the offset excursion (min/max/span) seen in the
-	 * window, and the worst residual. off_span growing over time is the
-	 * signature of uncompensated drift or temperature wander.
-	 */
-	printk("time_sync_lt: t=%us samples=%u locked=%d offset=%lld.%02lld us "
-	       "drift=%lld ppm off_min=%lld us off_max=%lld us off_span=%lld us "
-	       "max_resid=%d us win_updates=%u\n",
-	       uptime_s, ts_count, ts_locked,
-	       (long long)off_int,
-	       (long long)(off_rem * 100 / TS_FRAC),
-	       (long long)((ts_drift_q * 1000000) >> (TS_DRIFT_Q_BITS + TS_FRAC_BITS)),
-	       (long long)(off_min_q / TS_FRAC),
-	       (long long)(off_max_q / TS_FRAC),
-	       (long long)((off_max_q - off_min_q) / TS_FRAC),
-	       ts_win_resid_max_us,
-	       window_updates);
+	out->off_min_us = mn;
+	out->off_max_us = mx;
+	out->off_span_us = mx - mn;
+	out->resid_max_us = round_us(ts_win_resid_max);
+	out->window_updates = kf_updates - ts_win_start_updates;
 
 	/* Start a fresh window. */
 	ts_win_has_sample = false;
-	ts_win_resid_max_us = 0;
-	ts_win_start_cnt = ts_update_cnt;
+	ts_win_resid_max = 0.0;
+	ts_win_start_updates = kf_updates;
 }

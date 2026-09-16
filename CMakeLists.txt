@@ -9,7 +9,7 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(iso_time_sync)
 
 target_include_directories(app PRIVATE include)
-target_sources(app PRIVATE src/main.c src/timed_led_toggle.c src/time_sync.c)
+target_sources(app PRIVATE src/main.c src/timed_led_toggle.c src/time_sync.c src/sync_log.c)
 
 if(CONFIG_BT_ISO_BROADCASTER)
   target_sources(app PRIVATE src/bis_transmitter.c)

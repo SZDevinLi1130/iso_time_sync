@@ -19,6 +19,7 @@
 #include <zephyr/drivers/gpio.h>
 #include "iso_time_sync.h"
 #include "time_sync.h"
+#include "sync_log.h"
 
 static void iso_recv(struct bt_iso_chan *chan, const struct bt_iso_recv_info *info,
 		     struct net_buf *buf);
@@ -130,27 +131,26 @@ static void iso_recv(struct bt_iso_chan *chan, const struct bt_iso_recv_info *in
 		/* Colour-highlighted sync log (UART): RX-side timestamp mapped
 		 * into the broadcaster timebase, matching the TX-side timestamp.
 		 */
-		uint32_t shared_ts = time_sync_to_shared(info->ts);
-
-		sync_event_log(counter, shared_ts);
+		sync_log_event(counter, time_sync_to_shared(info->ts));
 	}
 
 	if (counter % LOG_PERIOD_SDUS == 0) {
-		uint32_t shared_ts = time_sync_to_shared(info->ts);
-
-		printk("Recv SDU counter %u timestamp %u us btn_val: %d shared_ts %u us\n",
-		       counter, info->ts, btn_pressed, shared_ts);
+		sync_log_sdu_rx(counter, info->ts, btn_pressed,
+				time_sync_to_shared(info->ts));
 	}
 
 	if (counter != 0 && counter % 2000 == 0) {
-		time_sync_stats_print();
+		struct time_sync_stats stats;
+
+		time_sync_stats_snapshot(&stats);
+		sync_log_stats(&stats);
 	}
 
 	if (counter != 0 && counter % LT_STATS_PERIOD_SDUS == 0) {
-		time_sync_lt_stats_print();
-		printk("iso_rx_lt: t=%us received=%u lost=%u resync=%u\n",
-		       (uint32_t)(k_uptime_get() / 1000),
-		       rx_sdu_count, rx_lost_count, rx_resync_count);
+		struct time_sync_lt_stats lt;
+
+		time_sync_lt_stats_snapshot(&lt);
+		sync_log_lt(&lt, rx_sdu_count, rx_lost_count, rx_resync_count);
 	}
 }
 

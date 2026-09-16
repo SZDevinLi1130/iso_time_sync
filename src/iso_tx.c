@@ -28,6 +28,7 @@
 #include <sdc_hci.h>
 
 #include "iso_time_sync.h"
+#include "sync_log.h"
 
 static struct gpio_dt_spec led_on_sdu_send = GPIO_DT_SPEC_GET_OR(DT_ALIAS(led0), gpios, {0});
 
@@ -426,17 +427,15 @@ static void iso_sent(struct bt_iso_chan *chan)
 		/* Colour-highlighted sync log (UART): TX-side timestamp of the
 		 * button-initiated sync event, in the broadcaster timebase.
 		 */
-		sync_event_log(prev_sent_sdu, assigned_timestamp);
+		sync_log_event(prev_sent_sdu, assigned_timestamp);
 		sync_event_in_flight = false;
 	}
 
 	if (prev_sent_sdu % LOG_PERIOD_SDUS == 0) {
 		int32_t time_to_trigger = trigger_time_us - controller_time_us;
 
-		printk("Sent SDU counter %u with timestamp %u us, controller_time %u us, ",
-			   prev_sent_sdu, assigned_timestamp, controller_time_us);
-		printk("btn_val: %d LED will be set in %d us\n",
-			   btn_pressed, time_to_trigger);
+		sync_log_sdu_tx(prev_sent_sdu, assigned_timestamp, controller_time_us,
+				btn_pressed, time_to_trigger);
 	}
 }
 

@@ -42,18 +42,6 @@
 #define LT_STATS_PERIOD_SDUS \
 	((uint32_t)CONFIG_TIME_SYNC_LT_STATS_PERIOD_S * 1000000U / CONFIG_SDU_INTERVAL_US)
 
-/** Print a colour-highlighted sync-event line over UART (ANSI colour).
- *
- * Used by both the transmitter and every receiver so they log the same
- * SDU counter + timestamp in an identical format. The ANSI escape sequence
- * renders the line in bright red in a colour-capable terminal.
- */
-static inline void sync_event_log(uint32_t counter, uint32_t timestamp_us)
-{
-	printk("\x1B[1;31mSYNC EVENT: counter %u, timestamp %u us\x1B[0m\n",
-	       counter, timestamp_us);
-}
-
 /** Start BIS transmitter demo.
  *
  * @param retransmission_number    Requested retransmission number.
