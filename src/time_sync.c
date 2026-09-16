@@ -36,7 +36,12 @@
 #include <string.h>
 #include "time_sync.h"
 
-#define TS_RING_SIZE         512
+/* Short window: the offset reference stays fresh (extrapolation span is
+ * only half the window), which keeps the stamping residual caused by the
+ * non-linear short-term wander of the two GRTC clocks well below 1 us.
+ * Window 128 samples = 0.64 s at the 5 ms SDU interval.
+ */
+#define TS_RING_SIZE         128
 #define TS_MIN_LOCK_SAMPLES  64
 #define TS_SDU_INTERVAL_US   5000UL    /* nominal SDU interval (see prj.conf) */
 
