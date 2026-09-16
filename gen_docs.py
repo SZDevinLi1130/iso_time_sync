@@ -44,7 +44,7 @@ doc.add_paragraph(
 )
 
 doc.add_heading("1.1 关键指标", level=2)
-tbl = doc.add_table(rows=6, cols=2)
+tbl = doc.add_table(rows=7, cols=2)
 tbl.style = "Light Grid Accent 1"
 rows = [
     ("同步精度（时间戳一致）", "约 1 µs（实测 shared_ts 与发送端 timestamp 完全相等）"),
@@ -52,6 +52,7 @@ rows = [
     ("SDU 间隔 / 更新率", "5 ms（规范最小值）/ 200 Hz"),
     ("BIS 数量 / 拓扑", "1 条 BIS / 1 发 + 2 收（可扩展）"),
     ("长期漂移处理", "晶振漂移（ppm）在线估计 + 外推 + holdover"),
+    ("长期稳定性验证", "每 60s 汇总 offset 极差/drift/丢包，支持 ≥1 小时长跑"),
 ]
 for i, (k, v) in enumerate(rows):
     tbl.rows[i].cells[0].text = k
@@ -98,7 +99,7 @@ doc.add_heading("3. 软件实现方法", level=1)
 
 doc.add_heading("3.1 系统架构", level=2)
 doc.add_paragraph(
-    "发送端：生成 100ms 触发事件 + 递增 counter，把 (trigger, counter, tx_ts) 组成 9 字节 SDU 经 BIS 广播；"
+    "发送端：每个 SDU 生成一次触发事件 + 递增 counter，把 (trigger, counter, tx_ts) 组成 9 字节 SDU 经 BIS 广播；"
     "同时在本地 presentation 时刻在 P1.10 上产生 1µs 脉冲。"
     "接收端：解析 SDU，将 (tx_ts, info->ts) 送入时钟伺服，输出 shared_ts，并在 P1.10 上同步呈现脉冲。"
 )
@@ -118,9 +119,11 @@ doc.add_paragraph(
 )
 for s in [
     "offset 测量：meas = (int32_t)(tx_ts - local_ts)。两时钟同以 1MHz 回绕，32 位有符号差天然 wrap-safe；",
-    "offset 估计：256 样本滑动窗口取中位数（对离群点鲁棒，抵消丢包/重传/处理延迟影响）；",
-    "drift 估计：两个半窗中位数求斜率，得到 ppm 漂移率；",
-    "漂移外推：shared_ts = local + offset_median + drift × age，把窗口中点时刻的 offset 外推到当前时刻，"
+    "offset 估计：128 样本滑动窗口的 trimmed mean（去掉两端各 25%），1/256µs 定点，"
+    "兼顾离群点鲁棒性与亚 µs 分辨率；",
+    "drift 估计：对窗口内样本做最小二乘线性回归求斜率，得到 ppm 漂移率"
+    "（比两点斜率噪声低约一个数量级）；",
+    "漂移外推：shared_ts = local + offset + drift × age，把窗口中点时刻的 offset 外推到当前时刻，"
     "消除“陈旧误差”并覆盖 holdover。",
 ]:
     doc.add_paragraph(s, style="List Bullet")
@@ -133,7 +136,7 @@ rows2 = [
     ("CONFIG_TIMED_LED_PRESENTATION_DELAY_US", "1500 µs"),
     ("CONFIG_BT_ISO_TX_MTU", "16（SDU 9 字节 + 余量）"),
     ("num_bis", "1（1 发 2 收共用 BIS index 1）"),
-    ("RTN / 触发周期", "1（NSE=2）/ 100ms 一个 1µs 脉冲"),
+    ("RTN / 触发周期", "1（NSE=2）/ 每个 SDU 一个 1µs 脉冲（5ms）"),
 ]
 for i, (k, v) in enumerate(rows2):
     tbl2.rows[i].cells[0].text = k
@@ -160,7 +163,7 @@ rows3 = [
     ("SDU 间隔（5ms）", "采样/呈现粒度", "取规范最小值；更细受限于 ISO 间隔下限"),
     ("时间戳量化", "±1µs 噪声底", "GRTC 1MHz 分辨率，属硬性极限"),
     ("presentation delay", "过小错过 deadline，过大被下一 SDU 抢断", "PD+处理提前量 < SDU 间隔"),
-    ("丢包 / 重传", "offset 样本离群", "中位数鲁棒估计"),
+    ("丢包 / 重传", "offset 样本离群", "trimmed mean 鲁棒估计"),
     ("printk/线程阻塞", "个别 SDU 处理延迟", "伺服按离群点剔除；低频打印"),
     ("温度变化", "晶振 ppm 漂移", "持续跟踪 drift；必要时温度补偿"),
 ]
@@ -176,7 +179,8 @@ for s in [
     "长期运行：32 位时间戳约 71.6 分钟回绕；需要漂移跟踪 + holdover（失同步时按最后速率滑行）与恢复后快速重收敛。",
     "绝对 UTC 对齐：BIS 只能保证节点间相对同步；若需绝对 UTC/网络时间，需要额外时源（GNSS/NTP）或校准协议。",
     "功耗：5ms 间隔意味着 200Hz 的射频/处理活动；低功耗场景需权衡间隔与电流。",
-    "验证方法：逻辑分析仪多通道抓 P1.10 脉冲边沿，测最大/最小/标准差；长跑 ≥1 小时统计 offset/ppm/最大偏差。",
+    "验证方法：逻辑分析仪多通道抓 P1.10 脉冲边沿，测最大/最小/标准差；长跑 ≥1 小时看串口 "
+    "time_sync_lt / iso_rx_lt 行统计 offset 极差/ppm/最大残差/丢包。",
 ]:
     doc.add_paragraph(s, style="List Bullet")
 
@@ -199,6 +203,16 @@ doc.add_paragraph(
 p = doc.add_paragraph()
 r = p.add_run("TX: Sent SDU counter 205600 timestamp 1028163407 us\n"
               "RX: Recv SDU counter 205600 ... shared_ts 1028163407 us")
+set_cn_font(r, name="Consolas", size=9)
+
+doc.add_paragraph(
+    "长期稳定性：接收端每 CONFIG_TIME_SYNC_LT_STATS_PERIOD_S（默认 60s）输出一行汇总，"
+    "用于 ≥1 小时长跑统计。示例："
+)
+p = doc.add_paragraph()
+r = p.add_run("time_sync_lt: t=3600s samples=128 locked=1 offset=123.45 us drift=12 ppm "
+              "off_min=123 us off_max=126 us off_span=3 us max_resid=1 us win_updates=12000\n"
+              "iso_rx_lt: t=3600s received=720000 lost=0 resync=0")
 set_cn_font(r, name="Consolas", size=9)
 
 doc.save(f"{OUT_DIR}/BIS时间同步技术总结.docx")
@@ -272,8 +286,8 @@ add_slide("同步原理（一）：时间戳载体", [
 
 add_slide("同步原理（二）：时钟伺服", [
     "offset = 发送端时钟 − 接收端时钟（约数十秒，来自开机时间差）",
-    "用 256 样本滑动窗口中位数，鲁棒估计 offset",
-    "用两半窗中位数斜率，估计晶振漂移 drift（ppm）",
+    "用 128 样本滑动窗口 trimmed mean，鲁棒估计 offset（1/256µs 定点）",
+    "用最小二乘线性回归斜率，估计晶振漂移 drift（ppm）",
     "shared = local + offset + drift×age，把本地时间换算到发送端时间基准",
 ])
 
@@ -292,7 +306,7 @@ add_slide("系统架构", [
 ])
 
 add_slide("演示效果", [
-    "P1.10 输出 1µs 窄脉冲，周期 100ms",
+    "P1.10 输出 1µs 窄脉冲，每个 SDU 一次（5ms）",
     "逻辑分析仪 3 通道抓 TX / RX1 / RX2 的脉冲边沿",
     "三通道上升沿基本重合，时间差即为同步误差",
     "串口日志：同一 counter 下 shared_ts 与发送端 timestamp 完全相等",
