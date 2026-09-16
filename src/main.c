@@ -28,6 +28,14 @@
 
 static const struct gpio_dt_spec role_pin = GPIO_DT_SPEC_GET(DT_ALIAS(sw1), gpios);
 
+/* Button (sw0 = P1.13) that requests an immediate time-sync event on the
+ * transmitter. Debounced in software.
+ */
+#define SYNC_BTN_DEBOUNCE_MS 50
+static const struct gpio_dt_spec sync_btn = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
+static struct gpio_callback sync_btn_cb;
+static int64_t last_sync_req_ms;
+
 /** Sample the role pin and return true if the device shall act as BIS transmitter. */
 static bool role_pin_selects_transmitter(void)
 {
@@ -73,6 +81,50 @@ static bool role_pin_selects_transmitter(void)
 	return low_count > (ROLE_PIN_SAMPLE_COUNT / 2);
 }
 
+static void sync_btn_pressed(const struct device *dev, struct gpio_callback *cb,
+			     uint32_t pins)
+{
+	int64_t now = k_uptime_get();
+
+	(void)dev;
+	(void)cb;
+	(void)pins;
+
+	if ((now - last_sync_req_ms) < SYNC_BTN_DEBOUNCE_MS) {
+		return;
+	}
+	last_sync_req_ms = now;
+
+	iso_tx_request_sync();
+}
+
+static void sync_button_init(void)
+{
+	int err;
+
+	if (!gpio_is_ready_dt(&sync_btn)) {
+		printk("Sync button device not ready\n");
+		return;
+	}
+
+	err = gpio_pin_configure_dt(&sync_btn, GPIO_INPUT);
+	if (err != 0) {
+		printk("Error %d: failed to configure sync button\n", err);
+		return;
+	}
+
+	err = gpio_pin_interrupt_configure_dt(&sync_btn, GPIO_INT_EDGE_TO_ACTIVE);
+	if (err != 0) {
+		printk("Error %d: failed to configure sync button interrupt\n", err);
+		return;
+	}
+
+	gpio_init_callback(&sync_btn_cb, sync_btn_pressed, BIT(sync_btn.pin));
+	gpio_add_callback(sync_btn.port, &sync_btn_cb);
+
+	printk("Sync button ready (sw0 = P1.13)\n");
+}
+
 int main(void)
 {
 	int err;
@@ -102,6 +154,7 @@ int main(void)
 		printk("Starting BIS transmitter with %u BIS streams, RTN: %d, max transport "
 		       "latency %d ms\n",
 		       BIS_NODE_COUNT, BIS_TX_RTN, BIS_TX_MAX_TRANSPORT_LATENCY_MS);
+		sync_button_init();
 		bis_transmitter_start(BIS_TX_RTN, BIS_TX_MAX_TRANSPORT_LATENCY_MS);
 	} else {
 		printk("Starting BIS receiver, BIS index %d\n", BIS_RX_DEFAULT_INDEX);

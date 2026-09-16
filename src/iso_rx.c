@@ -97,11 +97,20 @@ static void iso_recv(struct bt_iso_chan *chan, const struct bt_iso_recv_info *in
 		time_sync_update(tx_ts, info->ts);
 	}
 
-	if (counter % 100 == 0) {
-		int64_t shared_ts = time_sync_to_shared(info->ts);
+	if (btn_pressed == SYNC_EVENT_TRIGGER_VAL) {
+		/* Colour-highlighted sync log (UART): RX-side timestamp mapped
+		 * into the broadcaster timebase, matching the TX-side timestamp.
+		 */
+		uint32_t shared_ts = time_sync_to_shared(info->ts);
 
-		printk("Recv SDU counter %u timestamp %u us btn_val: %d shared_ts %lld us\n",
-		       counter, info->ts, btn_pressed, (long long)shared_ts);
+		sync_event_log(counter, shared_ts);
+	}
+
+	if (counter % LOG_PERIOD_SDUS == 0) {
+		uint32_t shared_ts = time_sync_to_shared(info->ts);
+
+		printk("Recv SDU counter %u timestamp %u us btn_val: %d shared_ts %u us\n",
+		       counter, info->ts, btn_pressed, shared_ts);
 	}
 
 	if (counter % 2000 == 0) {

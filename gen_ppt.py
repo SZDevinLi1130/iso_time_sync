@@ -21,6 +21,7 @@ WHITE  = (0xFF, 0xFF, 0xFF)
 INK    = (0x1A, 0x2B, 0x3C)
 GRAY   = (0x5A, 0x6B, 0x7B)
 CARD   = (0xF5, 0xF9, 0xFF)
+IMG    = "/home/devin/ncs/lim_work/iso_time_sync/scene_images"
 
 prs = Presentation()
 prs.slide_width = I(13.333)
@@ -109,17 +110,18 @@ def title_bar(slide, title, subtitle=None):
 # ================= 1 封面 =================
 s = prs.slides.add_slide(BLANK)
 bg(s, NAVY)
-deco_dots(s, 10)
-add_text(s, 0.9, 2.1, 11.5, 1.2, "nRF54L15 蓝牙 BIS 时间同步", 44, WHITE, True)
-add_text(s, 0.9, 3.25, 11.5, 0.8, "微秒级多节点时间同步 · 技术方案与演示", 24, CYAN)
-add_rect(s, 0.95, 4.15, 2.6, 0.06, CYAN, shape=MSO_SHAPE.RECTANGLE)
+deco_dots(s, 6)
+add_text(s, 0.7, 1.7, 6.0, 1.5, "nRF54L15\n蓝牙 BIS 时间同步", 40, WHITE, True)
+add_text(s, 0.7, 3.5, 6.0, 1.0, "机器人大脑与四肢关节\n时钟同步 · 技术方案与演示", 22, CYAN)
+add_rect(s, 0.75, 4.85, 2.6, 0.06, CYAN, shape=MSO_SHAPE.RECTANGLE)
 tags = ["BLE 5.2 ISO", "1 发 2 收", "1µs 精度", "200Hz 更新"]
-x = 0.95
+x = 0.7
 for t in tags:
-    sp = add_rect(s, x, 4.45, 2.3, 0.6, NAVY2, line=CYAN)
-    add_shape_text(sp, t, 15, CYAN)
-    x += 2.55
-add_text(s, 0.9, 6.6, 11.5, 0.5, "Nordic nRF Connect SDK v3.4.0 · nRF54L15", 13, GRAY)
+    add_shape_text(add_rect(s, x, 5.15, 1.75, 0.55, NAVY2, line=CYAN), t, 13, CYAN)
+    x += 1.95
+add_text(s, 0.7, 6.7, 6.0, 0.5, "Nordic nRF Connect SDK v3.4.0 · nRF54L15", 12, GRAY)
+add_rect(s, 6.9, 0.9, 6.2, 4.35, None, line=CYAN)
+s.shapes.add_picture(f"{IMG}/Brain_to_joint_clock_synchroni_2026-09-15T04-52-51.png", I(7.0), I(1.0), width=I(6.0))
 
 # ================= 2 目录 =================
 s = prs.slides.add_slide(BLANK)
@@ -148,13 +150,15 @@ goals = [
     ("微秒级打戳一致", "三方对同一事件打出相同时间戳，精度约 1µs"),
     ("硬件级确定性呈现", "P1.10 输出 1µs 窄脉冲，边沿对齐可被逻辑分析仪直观观测"),
 ]
-x = 0.8
+yy = 1.7
 for t, d in goals:
-    sp = add_rect(s, x, 1.9, 3.8, 3.4, WHITE, line=BLUE2)
-    add_rect(s, x, 1.9, 3.8, 0.18, CYAN, shape=MSO_SHAPE.RECTANGLE)
-    add_text(s, x + 0.3, 2.4, 3.2, 1.4, t, 19, NAVY, True)
-    add_text(s, x + 0.3, 3.6, 3.2, 1.4, d, 14, GRAY)
-    x += 4.15
+    add_rect(s, 0.7, yy, 6.6, 1.55, WHITE, line=BLUE2)
+    add_rect(s, 0.7, yy, 0.16, 1.55, CYAN, shape=MSO_SHAPE.RECTANGLE)
+    add_text(s, 1.05, yy + 0.18, 6.0, 0.5, t, 18, NAVY, True)
+    add_text(s, 1.05, yy + 0.68, 6.0, 0.75, d, 13, GRAY)
+    yy += 1.75
+add_rect(s, 7.6, 1.6, 5.3, 5.3, None, line=BLUE2)
+s.shapes.add_picture(f"{IMG}/Robot_brain_controller_alignin_2026-09-15T04-52-51.png", I(7.7), I(1.7), width=I(5.1))
 
 # ================= 4 什么是 BIS =================
 s = prs.slides.add_slide(BLANK)
@@ -270,13 +274,17 @@ cols = [
         "Python（文档/图表生成）",
     ]),
 ]
-x = 0.7
+x = 0.5
 for t, c, items in cols:
-    add_rect(s, x, 1.7, 3.9, 4.7, WHITE, line=c)
-    add_rect(s, x, 1.7, 3.9, 0.7, c, shape=MSO_SHAPE.RECTANGLE)
-    add_shape_text(add_rect(s, x, 1.7, 3.9, 0.7, c, shape=MSO_SHAPE.RECTANGLE), t, 15, WHITE)
-    add_text(s, x + 0.3, 2.6, 3.3, 3.6, "\n".join("• " + it for it in items), 13, INK)
-    x += 4.2
+    add_rect(s, x, 1.7, 3.0, 4.7, WHITE, line=c)
+    add_rect(s, x, 1.7, 3.0, 0.7, c, shape=MSO_SHAPE.RECTANGLE)
+    add_shape_text(add_rect(s, x, 1.7, 3.0, 0.7, c, shape=MSO_SHAPE.RECTANGLE), t, 14, WHITE)
+    add_text(s, x + 0.25, 2.6, 2.6, 3.6, "\n".join("• " + it for it in items), 12, INK)
+    x += 3.15
+# 实测搭建插图面板
+add_rect(s, x, 1.7, 3.0, 4.7, WHITE, line=BLUE2)
+s.shapes.add_picture(f"{IMG}/Development_board_and_logic_an_2026-09-15T04-52-53.png", I(x + 0.15), I(1.85), width=I(2.7))
+add_text(s, x + 0.1, 4.7, 2.8, 1.4, "实测搭建：大脑主控板\n+ 关节节点 + 逻辑分析仪", 12, GRAY, align=PP_ALIGN.CENTER)
 
 # ================= 8 波形示意 =================
 s = prs.slides.add_slide(BLANK)
@@ -341,34 +349,51 @@ for (t, bullets), (px, py) in zip(adv, pos):
     add_text(s, px + 0.3, py + 0.72, 5.2, 1.6, "\n".join("• " + b for b in bullets), 12.5, INK)
 
 # ================= 11 应用场景 =================
-s = prs.slides.add_slide(BLANK)
-bg(s, LIGHT)
-title_bar(s, "应用场景", "SCENARIOS")
 scenes = [
-    ("分布式采集", "多传感器/多设备\n精密时间戳对齐"),
-    ("工业控制", "状态监测与\n协同控制"),
-    ("声学/振动", "多通道同步\n采集分析"),
-    ("协同测量", "统一时间基准的\n测量系统"),
+    ("机器人协同", "机器人大脑与四肢\n关节时钟同步", "Whole_body_coordinated_motion__2026-09-15T04-52-57.png"),
+    ("工业控制", "多轴运动控制\n分布式 PLC 同步", "Industrial_multi_axis_motion_c_2026-09-15T05-00-02.png"),
+    ("无线传感网络", "分布式 IoT 节点\n同步采集", "Wireless_sensor_network_of_dis_2026-09-15T05-00-01.png"),
+    ("声学阵列", "麦克风阵列\n波束成形", "Microphone_array_beamforming_w_2026-09-15T05-00-03.png"),
+    ("振动监测", "旋转机械多通道\n振动同步采集", "Vibration_monitoring_of_rotati_2026-09-15T05-00-07.png"),
+    ("电力系统", "智能电网\nPMU 相量测量", "Smart_grid_electrical_substati_2026-09-15T05-00-04.png"),
+    ("通信基站", "5G TDD\n时间同步", "Telecom_base_station_tower_wit_2026-09-15T05-00-07.png"),
+    ("金融交易", "低延迟行情\n时间戳同步", "Financial_trading_system_with__2026-09-15T05-00-11.png"),
+    ("自动驾驶", "多传感器融合\nLiDAR / 相机 / IMU", "Autonomous_vehicle_sensor_fusi_2026-09-15T05-00-06.png"),
+    ("音视频同步", "多相机多麦克风\n音画同步", "Multi_camera_and_microphone_st_2026-09-15T05-00-12.png"),
+    ("科学测量", "射电望远镜阵列\n分布式测量", "Radio_telescope_array_with_syn_2026-09-15T05-00-07.png"),
+    ("医疗设备", "多设备\n同步监测", "Medical_monitoring_devices_syn_2026-09-15T05-00-09.png"),
 ]
-x = 0.7
-for t, d in scenes:
-    add_rect(s, x, 2.0, 2.9, 3.2, CARD, line=BLUE2)
-    add_rect(s, x, 2.0, 0.16, 3.2, BLUE, shape=MSO_SHAPE.RECTANGLE)
-    add_text(s, x + 0.35, 2.3, 2.4, 0.6, t, 18, NAVY, True)
-    add_text(s, x + 0.35, 3.1, 2.4, 1.8, d, 14, GRAY)
-    x += 3.15
+PER = 6
+for pg in range(2):
+    s = prs.slides.add_slide(BLANK)
+    bg(s, LIGHT)
+    title_bar(s, "应用场景" if pg == 0 else "应用场景（续）",
+              ("SCENARIOS · 所有需要时钟 / 信号同步的领域" if pg == 0
+               else "SCENARIOS · 更多同步应用领域"))
+    chunk = scenes[pg * PER:(pg + 1) * PER]
+    x0, y0, cw, ch, gx, gy = 0.55, 1.7, 4.0, 2.62, 0.15, 0.22
+    for i, (t, d, fn) in enumerate(chunk):
+        r, c = divmod(i, 3)
+        x = x0 + c * (cw + gx)
+        y = y0 + r * (ch + gy)
+        add_rect(s, x, y, cw, ch, CARD, line=BLUE2)
+        add_rect(s, x, y, 0.14, ch, BLUE, shape=MSO_SHAPE.RECTANGLE)
+        s.shapes.add_picture(f"{IMG}/{fn}", I(x + 0.22), I(y + 0.48), width=I(1.65))
+        add_text(s, x + 2.0, y + 0.32, 1.9, 0.45, t, 14, NAVY, True)
+        add_text(s, x + 2.0, y + 0.8, 1.9, 1.6, d, 10.5, GRAY)
 
 # ================= 12 总结 =================
 s = prs.slides.add_slide(BLANK)
 bg(s, NAVY)
-deco_dots(s, 8)
-add_text(s, 0.9, 2.0, 11.5, 1.2, "总结", 40, WHITE, True)
-add_text(s, 0.9, 3.2, 11.5, 2.4,
-         "基于 BLE BIS + 控制器时间戳 + 时钟伺服，实现微秒级多节点时间同步\n\n"
-         "实测时间戳完全一致（0µs）· 脉冲边沿 µs 级对齐 · 长期稳定 · 一对多可扩展",
-         20, CYAN)
-add_rect(s, 0.95, 5.9, 2.6, 0.06, CYAN, shape=MSO_SHAPE.RECTANGLE)
-add_text(s, 0.9, 6.2, 11.5, 0.6, "感谢观看 · 欢迎交流", 16, WHITE)
+deco_dots(s, 6)
+add_text(s, 0.7, 1.7, 6.0, 1.0, "总结", 40, WHITE, True)
+add_text(s, 0.7, 2.9, 6.0, 2.8,
+         "基于 BLE BIS + 控制器时间戳 + 时钟伺服\n\n实现微秒级多节点时间同步\n\n"
+         "实测时间戳一致（0µs）· 边沿 µs 级对齐", 18, CYAN)
+add_rect(s, 0.75, 6.0, 2.6, 0.06, CYAN, shape=MSO_SHAPE.RECTANGLE)
+add_text(s, 0.7, 6.25, 6.0, 0.6, "感谢观看 · 欢迎交流", 16, WHITE)
+add_rect(s, 6.9, 1.1, 6.1, 4.15, None, line=CYAN)
+s.shapes.add_picture(f"{IMG}/Brain_to_joint_clock_synchroni_2026-09-15T04-52-51.png", I(7.0), I(1.2), width=I(5.9))
 
 prs.save(OUT)
 print("PPT 已重新生成：", OUT)

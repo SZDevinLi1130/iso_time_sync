@@ -32,15 +32,13 @@
 static struct gpio_dt_spec led_on_sdu_send = GPIO_DT_SPEC_GET_OR(DT_ALIAS(led0), gpios, {0});
 
 /* Auto trigger source: one pulse event every 100 ms, derived from the SDU
- * counter. The pulse itself is generated on the GPIO at the presentation
- * instant (see timed_led_toggle.c). To use an external trigger signal
- * instead, sample its GPIO here.
+ * counter (see AUTO_TRIGGER_PERIOD_SDUS). The pulse itself is generated on
+ * the GPIO at the presentation instant (see timed_led_toggle.c). To use an
+ * external trigger signal instead, sample its GPIO here.
  */
-#define TRIGGER_PERIOD_SDUS (100000 / CONFIG_SDU_INTERVAL_US)
-
 static bool trigger_value_get(uint32_t sdu_counter)
 {
-	return (sdu_counter % TRIGGER_PERIOD_SDUS) == 0;
+	return (sdu_counter % AUTO_TRIGGER_PERIOD_SDUS) == 0;
 }
 
 static void iso_sent(struct bt_iso_chan *chan);
@@ -56,6 +54,11 @@ NET_BUF_POOL_FIXED_DEFINE(tx_pool, CONFIG_BT_ISO_MAX_CHAN,
 static bool first_sdu_sent;
 static uint32_t tx_sdu_timestamp_us;
 static uint32_t num_sdus_sent;
+
+/* Button-initiated time-sync event state. */
+static volatile bool sync_event_requested;
+static bool sync_event_in_flight;
+static uint32_t sync_event_counter;
 
 static void sdu_work_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(sdu_work, sdu_work_handler);
@@ -173,7 +176,7 @@ static int iso_tx_time_stamp_get(struct bt_conn *conn, uint32_t *time_stamp)
 	return 0;
 }
 
-static int send_next_sdu(struct bt_iso_chan *chan, bool btn_pressed)
+static int send_next_sdu(struct bt_iso_chan *chan, uint8_t trigger_val)
 {
 	struct net_buf *buf;
 
@@ -184,7 +187,7 @@ static int send_next_sdu(struct bt_iso_chan *chan, bool btn_pressed)
 	}
 
 	net_buf_reserve(buf, BT_ISO_CHAN_SEND_RESERVE);
-	net_buf_add_u8(buf, btn_pressed);
+	net_buf_add_u8(buf, trigger_val);
 	net_buf_add_le32(buf, num_sdus_sent);
 	/* Embed the scheduled transmission timestamp of this SDU. It is the
 	 * controller clock instant corresponding to the SDU synchronization
@@ -202,13 +205,31 @@ static int send_next_sdu(struct bt_iso_chan *chan, bool btn_pressed)
 	return 0;
 }
 
+void iso_tx_request_sync(void)
+{
+	sync_event_requested = true;
+}
+
 static void send_next_sdu_on_all_channels(void)
 {
 	int err;
-	bool btn_pressed = trigger_value_get(num_sdus_sent);
+	uint8_t trigger_val;
+
+	if (sync_event_requested) {
+		/* Tag this SDU as a button-initiated sync event so that the
+		 * transmitter and every receiver can print the same counter and
+		 * timestamp.
+		 */
+		sync_event_requested = false;
+		sync_event_in_flight = true;
+		sync_event_counter = num_sdus_sent;
+		trigger_val = SYNC_EVENT_TRIGGER_VAL;
+	} else {
+		trigger_val = trigger_value_get(num_sdus_sent) ? 1 : 0;
+	}
 
 	if (IS_ENABLED(CONFIG_LED_TOGGLE_IMMEDIATELY_ON_SEND_OR_RECEIVE)) {
-		gpio_pin_set_dt(&led_on_sdu_send, btn_pressed);
+		gpio_pin_set_dt(&led_on_sdu_send, trigger_val != 0);
 	}
 
 	for (size_t i = 0; i < CONFIG_BT_ISO_MAX_CHAN; i++) {
@@ -217,7 +238,7 @@ static void send_next_sdu_on_all_channels(void)
 			continue;
 		}
 
-		err = send_next_sdu(&iso_channels[i], btn_pressed);
+		err = send_next_sdu(&iso_channels[i], trigger_val);
 		if (err) {
 			printk("Failed sending SDU, counter %d, index %d\n", num_sdus_sent, i);
 			return;
@@ -359,9 +380,17 @@ static void iso_sent(struct bt_iso_chan *chan)
 	uint8_t chan_index = ARRAY_INDEX(iso_channels, chan);
 
 	/* Present the trigger value of the SDU just sent (num_sdus_sent is
-	 * incremented below, so it still holds the counter of this SDU).
+	 * incremented below, so it still holds the counter of this SDU). A
+	 * button-initiated sync event is non-zero, so it also produces a pulse
+	 * on P1.10; otherwise the 100 ms auto trigger applies.
 	 */
-	bool btn_pressed = trigger_value_get(num_sdus_sent);
+	bool btn_pressed;
+
+	if (sync_event_in_flight && num_sdus_sent == sync_event_counter) {
+		btn_pressed = true;
+	} else {
+		btn_pressed = trigger_value_get(num_sdus_sent);
+	}
 	uint32_t trigger_time_us = trigger_time_us_get(assigned_timestamp,
 						       chan_index);
 	timed_led_toggle_trigger_at(btn_pressed, trigger_time_us);
@@ -393,7 +422,15 @@ static void iso_sent(struct bt_iso_chan *chan)
 	/* Increment the SDU timestamp with one SDU interval. */
 	tx_sdu_timestamp_us = assigned_timestamp + CONFIG_SDU_INTERVAL_US;
 
-	if (prev_sent_sdu % 100 == 0) {
+	if (sync_event_in_flight && prev_sent_sdu == sync_event_counter) {
+		/* Colour-highlighted sync log (UART): TX-side timestamp of the
+		 * button-initiated sync event, in the broadcaster timebase.
+		 */
+		sync_event_log(prev_sent_sdu, assigned_timestamp);
+		sync_event_in_flight = false;
+	}
+
+	if (prev_sent_sdu % LOG_PERIOD_SDUS == 0) {
 		int32_t time_to_trigger = trigger_time_us - controller_time_us;
 
 		printk("Sent SDU counter %u with timestamp %u us, controller_time %u us, ",

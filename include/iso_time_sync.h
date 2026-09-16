@@ -15,9 +15,38 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <zephyr/sys/printk.h>
 #include <zephyr/bluetooth/iso.h>
 
 #define SDU_SIZE_BYTES 9 /* SDU = [trigger_val(1), sdu_counter le32(4), tx_ts le32(4)]*/
+
+/* Trigger value carried in the SDU that marks a button-initiated time-sync
+ * event. Ordinary auto-generated triggers use 0/1; 2 is reserved so that the
+ * transmitter and every receiver can recognize (and print) the same event.
+ */
+#define SYNC_EVENT_TRIGGER_VAL 2
+
+/* Auto trigger cadence: one pulse every 5 ms (every SDU), expressed in SDUs.
+ * Each SDU becomes a synchronization reference point for the logic analyzer.
+ */
+#define AUTO_TRIGGER_PERIOD_SDUS (5000U / CONFIG_SDU_INTERVAL_US)
+
+/* Periodic log cadence: one log line every 1 second (200 SDUs at 5 ms),
+ * shared by TX and RX so both sides print at the same cadence.
+ */
+#define LOG_PERIOD_SDUS (1000000U / CONFIG_SDU_INTERVAL_US)
+
+/** Print a colour-highlighted sync-event line over UART (ANSI colour).
+ *
+ * Used by both the transmitter and every receiver so they log the same
+ * SDU counter + timestamp in an identical format. The ANSI escape sequence
+ * renders the line in bright red in a colour-capable terminal.
+ */
+static inline void sync_event_log(uint32_t counter, uint32_t timestamp_us)
+{
+	printk("\x1B[1;31mSYNC EVENT: counter %u, timestamp %u us\x1B[0m\n",
+	       counter, timestamp_us);
+}
 
 /** Start BIS transmitter demo.
  *
@@ -55,6 +84,13 @@ void cis_peripheral_start(bool do_tx);
  *						   This can be set to NULL.
  */
 void iso_tx_init(uint8_t retransmission_number, void (*iso_connected_cb)(void));
+
+/** Request an immediate time-sync event on the transmitter.
+ *
+ * The next SDU is tagged with SYNC_EVENT_TRIGGER_VAL, so both the transmitter
+ * and all receivers print the same SDU counter and timestamp over UART.
+ */
+void iso_tx_request_sync(void);
 
 /** Initialize RX path channel.
  *

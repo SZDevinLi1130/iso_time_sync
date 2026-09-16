@@ -4,3 +4,10 @@
 
 # build
 /build*/
+
+# LibreOffice lock/temp files
+.~*
+*.lock
+
+# logic analyzer captures (debug artifacts)
+*.dsl
