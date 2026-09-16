@@ -33,7 +33,7 @@
 #include <string.h>
 #include "time_sync.h"
 
-#define TS_RING_SIZE         256
+#define TS_RING_SIZE         512
 #define TS_MIN_LOCK_SAMPLES  64
 #define TS_SDU_INTERVAL_US   5000UL    /* nominal SDU interval (see prj.conf) */
 
