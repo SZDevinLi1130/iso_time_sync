@@ -55,6 +55,17 @@ static struct bt_iso_chan *iso_channels[] = {
 	&iso_chan[0],
 };
 
+/* Long-term link statistics for stability verification: received SDUs,
+ * estimated missing SDUs (counter gaps), and large-gap re-sync events.
+ * A gap of RX_RESYNC_GAP_SDUS or more is treated as a lost/re-synced BIG.
+ */
+#define RX_RESYNC_GAP_SDUS 200 /* >= 1 s at the 5 ms SDU interval */
+static uint32_t rx_sdu_count;
+static uint32_t rx_lost_count;
+static uint32_t rx_resync_count;
+static uint32_t rx_prev_counter;
+static bool rx_have_prev;
+
 static void iso_recv(struct bt_iso_chan *chan, const struct bt_iso_recv_info *info,
 		     struct net_buf *buf)
 {
@@ -82,6 +93,24 @@ static void iso_recv(struct bt_iso_chan *chan, const struct bt_iso_recv_info *in
 	uint32_t tx_ts = net_buf_remove_le32(buf);
 	uint32_t counter = net_buf_remove_le32(buf);
 	uint8_t btn_pressed = net_buf_remove_u8(buf);
+
+	/* Link statistics: the broadcaster increments the counter by one per
+	 * SDU, so a gap means SDUs were missed. Unsigned subtraction stays
+	 * correct across the 32-bit wrap.
+	 */
+	rx_sdu_count++;
+	if (rx_have_prev) {
+		uint32_t gap = counter - rx_prev_counter;
+
+		if (gap > 1) {
+			rx_lost_count += gap - 1;
+			if (gap >= RX_RESYNC_GAP_SDUS) {
+				rx_resync_count++;
+			}
+		}
+	}
+	rx_prev_counter = counter;
+	rx_have_prev = true;
 
 	if (IS_ENABLED(CONFIG_LED_TOGGLE_IMMEDIATELY_ON_SEND_OR_RECEIVE)) {
 		gpio_pin_set_dt(&led_sdu_received, btn_pressed);
@@ -113,8 +142,15 @@ static void iso_recv(struct bt_iso_chan *chan, const struct bt_iso_recv_info *in
 		       counter, info->ts, btn_pressed, shared_ts);
 	}
 
-	if (counter % 2000 == 0) {
+	if (counter != 0 && counter % 2000 == 0) {
 		time_sync_stats_print();
+	}
+
+	if (counter != 0 && counter % LT_STATS_PERIOD_SDUS == 0) {
+		time_sync_lt_stats_print();
+		printk("iso_rx_lt: t=%us received=%u lost=%u resync=%u\n",
+		       (uint32_t)(k_uptime_get() / 1000),
+		       rx_sdu_count, rx_lost_count, rx_resync_count);
 	}
 }
 

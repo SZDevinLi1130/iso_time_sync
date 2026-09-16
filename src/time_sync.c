@@ -73,6 +73,16 @@ static uint32_t ts_ref_local;
 static uint32_t ts_update_cnt;
 static int32_t ts_residual_max_us;
 
+/* Long-term verification window: min/max of the offset estimate and the worst
+ * residual observed since the previous time_sync_lt_stats_print(). The offset
+ * is kept in 1/256 us fixed point, the residual in us.
+ */
+static int64_t ts_win_off_min_q;
+static int64_t ts_win_off_max_q;
+static bool ts_win_has_sample;
+static int32_t ts_win_resid_max_us;
+static uint32_t ts_win_start_cnt;
+
 static int cmp_int32(const void *a, const void *b)
 {
 	int32_t x = *(const int32_t *)a;
@@ -197,6 +207,25 @@ void time_sync_update(uint32_t tx_ts_us, uint32_t local_ts_us)
 	if (resid > ts_residual_max_us) {
 		ts_residual_max_us = resid;
 	}
+
+	/* Track the offset excursion and worst residual for the long-term
+	 * stability summary.
+	 */
+	if (!ts_win_has_sample) {
+		ts_win_off_min_q = ts_offset_q;
+		ts_win_off_max_q = ts_offset_q;
+		ts_win_has_sample = true;
+	} else {
+		if (ts_offset_q < ts_win_off_min_q) {
+			ts_win_off_min_q = ts_offset_q;
+		}
+		if (ts_offset_q > ts_win_off_max_q) {
+			ts_win_off_max_q = ts_offset_q;
+		}
+	}
+	if (resid > ts_win_resid_max_us) {
+		ts_win_resid_max_us = resid;
+	}
 }
 
 uint32_t time_sync_to_shared(uint32_t local_ts_us)
@@ -245,4 +274,41 @@ void time_sync_stats_print(void)
 	       (long long)(off_rem * 100 / TS_FRAC),
 	       (long long)((ts_drift_q * 1000000) >> (TS_DRIFT_Q_BITS + TS_FRAC_BITS)),
 	       ts_count, ts_residual_max_us);
+}
+
+void time_sync_lt_stats_print(void)
+{
+	uint32_t uptime_s = (uint32_t)(k_uptime_get() / 1000);
+	int64_t off_int = ts_offset_q / TS_FRAC;
+	int64_t off_rem = ts_offset_q % TS_FRAC;
+	int64_t off_min_q = ts_win_has_sample ? ts_win_off_min_q : ts_offset_q;
+	int64_t off_max_q = ts_win_has_sample ? ts_win_off_max_q : ts_offset_q;
+	uint32_t window_updates = ts_update_cnt - ts_win_start_cnt;
+
+	if (off_rem < 0) {
+		off_rem = -off_rem;
+	}
+
+	/* One line per reporting window for long-run (>= 1 hour) verification:
+	 * absolute offset/drift, the offset excursion (min/max/span) seen in the
+	 * window, and the worst residual. off_span growing over time is the
+	 * signature of uncompensated drift or temperature wander.
+	 */
+	printk("time_sync_lt: t=%us samples=%u locked=%d offset=%lld.%02lld us "
+	       "drift=%lld ppm off_min=%lld us off_max=%lld us off_span=%lld us "
+	       "max_resid=%d us win_updates=%u\n",
+	       uptime_s, ts_count, ts_locked,
+	       (long long)off_int,
+	       (long long)(off_rem * 100 / TS_FRAC),
+	       (long long)((ts_drift_q * 1000000) >> (TS_DRIFT_Q_BITS + TS_FRAC_BITS)),
+	       (long long)(off_min_q / TS_FRAC),
+	       (long long)(off_max_q / TS_FRAC),
+	       (long long)((off_max_q - off_min_q) / TS_FRAC),
+	       ts_win_resid_max_us,
+	       window_updates);
+
+	/* Start a fresh window. */
+	ts_win_has_sample = false;
+	ts_win_resid_max_us = 0;
+	ts_win_start_cnt = ts_update_cnt;
 }

@@ -32,6 +32,15 @@ config LED_TOGGLE_IMMEDIATELY_ON_SEND_OR_RECEIVE
 	  data is sent or received. This allows for measurment
 	  of the mimimum end-to-end latency.
 
+config TIME_SYNC_LT_STATS_PERIOD_S
+	int "Long-term stability summary period in seconds"
+	default 60
+	range 1 86400
+	help
+	  How often each receiver prints a long-term stability summary line
+	  (offset min/max/span, drift, worst residual, packet loss). Intended
+	  for long-run (>= 1 hour) verification of the shared timestamp.
+
 config BIS_TIME_SYNC_MEASURE_GPIO
 	bool "Expose controller-timed BIS presentation on GPIO"
 	default n

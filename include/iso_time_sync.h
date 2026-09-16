@@ -36,6 +36,12 @@
  */
 #define LOG_PERIOD_SDUS (1000000U / CONFIG_SDU_INTERVAL_US)
 
+/* Long-term stability summary cadence: one summary line every
+ * CONFIG_TIME_SYNC_LT_STATS_PERIOD_S seconds, expressed in SDUs.
+ */
+#define LT_STATS_PERIOD_SDUS \
+	((uint32_t)CONFIG_TIME_SYNC_LT_STATS_PERIOD_S * 1000000U / CONFIG_SDU_INTERVAL_US)
+
 /** Print a colour-highlighted sync-event line over UART (ANSI colour).
  *
  * Used by both the transmitter and every receiver so they log the same

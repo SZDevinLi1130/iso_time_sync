@@ -47,4 +47,13 @@ bool time_sync_is_locked(void);
 /** @brief Print servo statistics (offset, drift, lock state). */
 void time_sync_stats_print(void);
 
+/** @brief Print a long-term stability summary and start a new window.
+ *
+ * Prints uptime, offset, drift, the min/max/span of the offset estimate
+ * observed since the previous call, and the worst residual in that window.
+ * Intended for long-run (>= 1 hour) verification. Safe to call from the
+ * Bluetooth RX workqueue.
+ */
+void time_sync_lt_stats_print(void);
+
 #endif /* TIME_SYNC_H__ */
