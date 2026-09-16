@@ -28,8 +28,10 @@ via a software clock servo. UI docs are in Chinese; code/comments are English.
   builds only; real verification is on hardware + a logic analyzer.
 
 ## Git
-- HEAD is detached at `92282bf` (same commit as `main`). Run `git checkout main`
-  before committing, or you will create dangling commits.
+- Work on `main`.
+- No git identity is configured (global or local), so a bare `git commit` fails.
+  Pass one explicitly, matching the existing author:
+  `git -c user.name=SZDevinLi1130 -c user.email=SZDevinLi1130@users.noreply.github.com commit ...`
 
 ## Architecture (src/)
 - Role is picked at boot by sampling `sw1` (P1.09): low → BIS transmitter,
