@@ -89,8 +89,8 @@ doc.add_paragraph(
 )
 for s in [
     "发送端把本 SDU 的预定发送时间戳 tx_ts 嵌入 payload，作为时间基准载体；",
-    "接收端对每个有效 SDU 得到参考对 (tx_ts, info->ts)，估计两时钟的 offset 与 drift（ppm）；",
-    "维护映射 shared(local) = local + offset + drift 外推，把本地 GRTC 换算到发送端时间基准。",
+    "接收端对每个有效 SDU 得到参考对 (tx_ts, info->ts)，用三状态 Kalman 估计 offset / drift / drift-rate；",
+    "维护映射 shared(local) = local + offset + drift×age + ½·drift-rate×age²，把本地 GRTC 换算到发送端时间基准。",
 ]:
     doc.add_paragraph(s, style="List Bullet")
 
@@ -113,20 +113,24 @@ doc.add_paragraph(
     "CONFIG_BT_ISO_TX_MTU 提升到 16，RX MTU 23 不变。"
 )
 
-doc.add_heading("3.3 时钟伺服核心（time_sync.c）", level=2)
+doc.add_heading("3.3 时钟伺服核心：三状态 Kalman（time_sync.c）", level=2)
 doc.add_paragraph(
-    "时钟伺服是纯软件模块，每 SDU 一次 O(1) 更新，无动态内存："
+    "时钟伺服是纯软件模块，每 SDU 一次 O(1) 更新，无动态内存，估计状态 "
+    "x = [offset(µs), drift(µs/s), drift-rate(µs/s²)]："
 )
 for s in [
-    "offset 测量：meas = (int32_t)(tx_ts - local_ts)。两时钟同以 1MHz 回绕，32 位有符号差天然 wrap-safe；",
-    "offset 估计：128 样本滑动窗口的 trimmed mean（去掉两端各 25%），1/256µs 定点，"
-    "兼顾离群点鲁棒性与亚 µs 分辨率；",
-    "drift 估计：对窗口内样本做最小二乘线性回归求斜率，得到 ppm 漂移率"
-    "（比两点斜率噪声低约一个数量级）；",
-    "漂移外推：shared_ts = local + offset + drift × age，把窗口中点时刻的 offset 外推到当前时刻，"
-    "消除“陈旧误差”并覆盖 holdover。",
+    "测量：meas = (int32_t)(tx_ts - local_ts)。两时钟同以 1MHz 回绕，32 位有符号差天然 wrap-safe，"
+    "状态约束在 [-2^31, 2^31)，新息按 2^32 取模；",
+    "预测/更新：标准 3×3 协方差 Kalman，过程噪声用离散 white-noise-jerk 模型（KF_JERK_PSD）；",
+    "抗离群：新息 |innov| > 6σ（或 > 100ms）直接丢弃，替代定窗的 trimmed mean；",
+    "映射：shared_ts = local + offset + drift×age + ½·drift-rate×age²，"
+    "holdover 时按最后的 offset/drift/drift-rate 滑行。",
 ]:
     doc.add_paragraph(s, style="List Bullet")
+doc.add_paragraph(
+    "相比旧的“128 样本 trimmed mean + 最小二乘”定窗方案：噪声/跟踪滞后由显式噪声模型自动折中，"
+    "drift-rate 状态可跟踪温漂斜坡并改善 holdover，离群门限更严格。"
+)
 
 doc.add_heading("3.4 关键参数配置", level=2)
 tbl2 = doc.add_table(rows=6, cols=2)
@@ -145,8 +149,10 @@ for i, (k, v) in enumerate(rows2):
 doc.add_heading("3.5 源码文件", level=2)
 for s in [
     "src/iso_tx.c：SDU 组包 + 时间戳嵌入 + 发送端定时呈现；",
-    "src/iso_rx.c：SDU 解析 + 时钟伺服接入 + 统计打印；",
-    "src/time_sync.c / include/time_sync.h：时钟伺服核心；",
+    "src/iso_rx.c：SDU 解析 + 时钟伺服接入 + 链路统计；",
+    "src/time_sync.c / include/time_sync.h：三状态 Kalman 时钟伺服；",
+    "src/sync_log.c / include/sync_log.h：延迟日志（消息队列 + 低优先级线程），"
+    "避免串口阻塞收发回调；",
     "src/timed_led_toggle.c：GRTC + DPPI + GPIOTE 的 controller-timed 呈现；",
     "src/controller_time_nrf54.c：双 GRTC 比较通道；",
     "src/main.c：P1.09 上电选择收发角色。",
@@ -163,7 +169,7 @@ rows3 = [
     ("SDU 间隔（5ms）", "采样/呈现粒度", "取规范最小值；更细受限于 ISO 间隔下限"),
     ("时间戳量化", "±1µs 噪声底", "GRTC 1MHz 分辨率，属硬性极限"),
     ("presentation delay", "过小错过 deadline，过大被下一 SDU 抢断", "PD+处理提前量 < SDU 间隔"),
-    ("丢包 / 重传", "offset 样本离群", "trimmed mean 鲁棒估计"),
+    ("丢包 / 重传", "offset 样本离群", "Kalman 新息门限（6σ）剔除"),
     ("printk/线程阻塞", "个别 SDU 处理延迟", "伺服按离群点剔除；低频打印"),
     ("温度变化", "晶振 ppm 漂移", "持续跟踪 drift；必要时温度补偿"),
 ]
@@ -286,9 +292,9 @@ add_slide("同步原理（一）：时间戳载体", [
 
 add_slide("同步原理（二）：时钟伺服", [
     "offset = 发送端时钟 − 接收端时钟（约数十秒，来自开机时间差）",
-    "用 128 样本滑动窗口 trimmed mean，鲁棒估计 offset（1/256µs 定点）",
-    "用最小二乘线性回归斜率，估计晶振漂移 drift（ppm）",
-    "shared = local + offset + drift×age，把本地时间换算到发送端时间基准",
+    "三状态 Kalman 同时估计 offset / drift / drift-rate",
+    "新息 6σ 门限剔除丢包/重传离群点",
+    "shared = local + offset + drift×age + ½·drift-rate×age²",
 ])
 
 add_slide("同步原理（三）：控制器定时呈现", [

@@ -217,7 +217,7 @@ add_text(s, 4.3, 1.3, 5.0, 0.5, "BIS 广播（5ms 间隔）", 12, GRAY, align=PP
 cards = [
     ("① 时间戳载体", "发送端把 SDU 同步参考时间戳\ntx_ts 写入 payload；接收端拿到\n同一瞬间的本地读数 info->ts",
      "参考对 (tx_ts, info->ts)"),
-    ("② 时钟伺服", "offset = 发送端时钟 − 接收端时钟\ntrimmed mean offset + 最小二乘 ppm 漂移\n外推到当前时刻",
+    ("② 时钟伺服", "三状态 Kalman：offset / drift / drift-rate\n新息 6σ 门限抗离群\n二阶外推到当前时刻",
      "shared = local + offset + drift×age"),
     ("③ 定时呈现", "GRTC → DPPI → GPIOTE 硬件链路\n在 presentation 时刻驱动 P1.10\n免软件线程抖动",
      "GRTC → DPPI → GPIOTE"),
@@ -338,7 +338,7 @@ adv = [
     ("硬件级确定性", [
         "GPIO 呈现免软件线程调度抖动",
         "SET/CLR 绝对电平、幂等自愈",
-        "trimmed mean 估计，对丢包/重传鲁棒",
+        "Kalman 新息门限，对丢包/重传鲁棒",
     ]),
 ]
 pos = [(0.7, 1.7), (6.85, 1.7), (0.7, 4.3), (6.85, 4.3)]

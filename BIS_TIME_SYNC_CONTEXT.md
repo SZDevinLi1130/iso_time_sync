@@ -21,31 +21,47 @@
   counter/timestamp）。
 - 发送端定时呈现由 GRTC 比较通道 → DPPI → GPIOTE SET/CLR 硬件链路完成，不走线程。
 
-## 时钟伺服（src/time_sync.c）
+## 时钟伺服：三状态 Kalman（src/time_sync.c）
 
-每个有效 SDU 提供一对同一物理瞬间的读数 `(tx_ts, info->ts)`：
+每个有效 SDU 提供一对同一物理瞬间的读数 `(tx_ts, info->ts)`。滤波器估计
 
-- offset 测量：`meas = (int32_t)(tx_ts - local_ts)`。两时钟同以 ~1 MHz 回绕，
-  32 位有符号差天然 wrap-safe。
-- offset 估计：128 样本滑动窗口的 **trimmed mean**（去掉两端各 25%），以 1/256 µs
-  定点保留小数，恢复单次 1 µs 测量无法表示的分辨率。
-- drift 估计：对窗口内样本做 **最小二乘线性回归** 求斜率（ppm）。两点斜率会留下
-  几 ppm 误差，经窗口中点外推后形成 ~1–2 µs 的系统性打戳误差；回归把该噪声降低
-  约一个数量级。
-- 映射：`shared(local) = local + offset + drift × age`。`offset` 对应窗口中点时刻，
-  `age` 为中点到当前时刻的本地时间差；holdover 时 age 持续增长，按最后速率滑行。
+```
+x = [ offset (µs), drift (µs/s), drift-rate (µs/s²) ]
+```
+
+- 测量：`z = (int32_t)(tx_ts - local_ts)`。两时钟同以 ~1 MHz 回绕，32 位有符号差
+  天然 wrap-safe；状态被约束在 `[-2^31, 2^31)`，新息按 2^32 取模。
+- 预测/更新：标准 3×3 协方差 Kalman，`F = [[1,dt,dt²/2],[0,1,dt],[0,0,1]]`，
+  过程噪声用离散 white-noise-jerk 模型（`KF_JERK_PSD`）。
+- 抗离群：新息 `|innov| > KF_GATE_SIGMA·√S` 或 > 100 ms 直接丢弃，替代原来的
+  trimmed mean 百分位带。
+- 映射：`shared(local) = local + offset + drift·age + 0.5·drift-rate·age²`，
+  `age` 为距上次更新的本地时间；holdover 时按最后的 offset/drift/drift-rate 滑行。
 - `time_sync_to_shared()` 必须保持 32 位无符号 wrap-safe：不能混入本地 GRTC 64 位
   高位，也不能按有符号解释（raw controller time 在 ~35.8 min 后越过 2^31）。
+
+相比旧的"128 样本 trimmed mean + 最小二乘"定窗方案：噪声/跟踪滞后由显式噪声模型
+自动折中，drift-rate 状态可跟踪温漂斜坡并改善 holdover，离群门限更严格。调参常量
+`KF_*` 在 `time_sync.c` 顶部，需用下面的 Allan/TDEV 实测结果进一步收敛。
+
+## 日志：延迟输出（src/sync_log.c）
+
+周期日志与同步事件日志不再在 BT RX/TX 回调里 `printk`，而是由回调把数值字段塞进
+一个定长消息队列，由低优先级线程（`K_LOWEST_APPLICATION_THREAD_PRIO`）格式化输出。
+队列满时丢弃、绝不阻塞调用者，从而保证 controller-timed 呈现路径不被串口延迟拖累。
 
 ## 长期稳定性验证
 
 接收端周期性输出（`CONFIG_TIME_SYNC_LT_STATS_PERIOD_S`，默认 60 s）：
 
-- `time_sync_lt: t=...s samples=... offset=...us drift=...ppm off_min=...us
-  off_max=...us off_span=...us max_resid=...us win_updates=...`
-  其中 `off_span`（窗口内 offset 极差）随时间是漂移/温漂未补偿的直接指标。
+- `time_sync_lt: t=...s samples=... rejected=... locked=... offset=...us
+  drift=...ppm off_min=...us off_max=...us off_span=...us max_resid=...us
+  win_updates=...`
+  其中 `off_span`（窗口内 offset 极差）随时间是漂移/温漂未补偿的直接指标，
+  `rejected` 是被离群门限丢弃的样本数。
 - `iso_rx_lt: t=...s received=... lost=... resync=...` 统计收到的 SDU、由 counter
   间隔估算的丢包数，以及大间隔（≥ 1 s）重同步次数。
+- 另有 10 s 一次的 `time_sync:` 行给出即时 offset/drift/最大残差，便于观察收敛过程。
 
 长跑步骤：三块板（1 TX + 2 RX）持续运行 ≥ 1 小时，串口记录上述行，统计 offset
 范围、drift（ppm）、max_resid 与丢包/重同步；同时用逻辑分析仪多通道抓脉冲边沿，
@@ -75,10 +91,12 @@
   GPIO 操作污染测量。
 - 以 controller-timed `led1` 边沿为最终误差指标，不要用 printk 时间戳或线程 GPIO
   操作。
-- presentation delay 必须明显大于最坏 host 处理时间，且满足
-  `ts_offset + delay < SDU interval`（当前 5 ms 间隔下 PD=1500 µs，留 ~0.5 ms 余量），
-  否则触发事件被下一 SDU 抢断、永不触发。
-- 伺服运行在 BT RX workqueue，栈很小：大数组必须放静态区，否则栈溢出导致复位。
+- presentation delay 不能随意加大：接收端在 SDU 时间戳前 ~3 ms 处理，5 ms 间隔下
+  上限约 2000 µs；超过后触发会被下一个 SDU 的重装载抢断、永不触发。当前 PD=1500 µs
+  留 ~0.5 ms 余量。要保护这个余量应缩短回调（日志已延迟到低优先级线程），而不是
+  加大 PD。
+- 伺服运行在 BT RX workqueue，栈很小：大数组必须放静态区，否则栈溢出导致复位
+  （Kalman 的 `kf_P`/`kf_x` 均为静态）。
 
 ## 当前限制
 
