@@ -67,6 +67,11 @@ via a software clock servo. UI docs are in Chinese; code/comments are English.
   enabled in `boards/nrf54l15dk_nrf54l15_cpuapp.overlay`, `CONFIG_SENSOR=y`,
   and the node itself. `CONFIG_TEMP_NRF5` and `CONFIG_TIME_SYNC_TEMP_COMP`
   then default to y.
+- RX current is significantly lower than TX because the receiver keeps the
+  radio and periodic-advertising sync active every 5 ms. The config
+  `CONFIG_BT_CTLR_SDC_LLPM=y` in `prj.conf` lets the controller sleep between
+  ISO events (typical gain ~1–2 mA). UART/console and any non-timed logging
+  also add mA — disable them for real power measurements.
 
 ## Generated docs / artifacts
 - `gen_docs.py`, `gen_ppt.py`, `gen_onepage.py` regenerate the Chinese
